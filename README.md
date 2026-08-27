@@ -20,7 +20,7 @@ python bench/bench_asr.py --backend paraformer --device cuda --tag my
 
 # 4) 跑起来（中文输出加 PYTHONIOENCODING=utf-8）
 python examples/transcribe_file.py 音频.wav --device cuda [--streaming]   # 文件转写（wav/mp3/flac/ogg；--streaming 流式逐块出字）
-python examples/record_mic.py --device cuda                  # 麦克风实时识别（sounddevice）
+python examples/record_mic.py --device cuda                  # 麦克风实时识别（无麦克风自动检测提示；--input-device 可指定设备；--streaming 流式逐块出字）
 ```
 
 - 完整环境版本与镜像源：见 [`docs/environment-voice1.md`](docs/environment-voice1.md)。
