@@ -26,6 +26,7 @@ _CFG = dict(
 class SherpaBackend(ASRBackend):
     name = "sherpa"
     sr = 16000
+    supports_streaming = True
 
     def __init__(self, device="auto", model_url=None):
         self._device = device
@@ -80,13 +81,22 @@ class SherpaBackend(ASRBackend):
             self._rec.decode_stream(self._stream)
         return self._rec.get_result(self._stream).strip()
 
-    def recognize_stream(self, chunk):
-        """在线流式增量（sherpa 原生支持）：返回当前部分文本。"""
+    def recognize_stream(self, chunk, is_final=False):
+        """在线流式增量（sherpa 原生支持，T13）：返回**累计**部分/完整文本。
+
+        `is_final=True` 收尾：`input_finished()` 结束输入 → 解码出最终文本，
+        并重建 stream（input_finished 后不可再喂；引擎随后也会 reset）。
+        """
         a = np.ascontiguousarray(chunk, dtype=np.float32)
         self._stream.accept_waveform(self.sr, a)
+        if is_final:
+            self._stream.input_finished()
         while self._rec.is_ready(self._stream):
             self._rec.decode_stream(self._stream)
-        return self._rec.get_result(self._stream).strip()
+        text = self._rec.get_result(self._stream).strip()
+        if is_final:
+            self._stream = self._rec.create_stream() if self._rec else None
+        return text
 
     def reset(self):
         """新句子 / 会话打断：清流式状态。"""

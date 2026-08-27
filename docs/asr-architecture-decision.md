@@ -233,7 +233,65 @@
   过静音的句子当噪声丢弃）。**引擎不自动归一化**（真实麦克风电平通常达标）；demo 脚本
   `demonstrate_interrupt.py` 归一至 peak 0.10 以兼容任意响度输入，注释说明了区间来源。
 
-## 待办清单
+## 实施记录（T13 已完成 · 2026-08-27）
+
+**流式逐帧出字（streaming）**：`streaming=True` 时 worker 对未断句块逐块 `recognize_stream`
+出 `on_partial` 部分字（"边说边出字"），句末 VAD 断句边界块以 `is_final=True` flush 定稿完整句。
+首字延迟从"整句话说完"压到 ~0.3-0.9s（与句长无关），尾字延迟恒定 ≈ VAD 尾 + flush 耗时。
+bench 对比（`reports/bench_streaming_T13_paraformer_cuda.txt`）：首字 **0.932s vs 3.110s**、
+尾字 **0.348s vs 0.626s**、严格 CER **0.017 vs 0.053**——流式全面胜出且达标（尾字 max 0.486s
+< 0.5s；整句 max 1.022s 破线）。CER 把关通过：流式定稿 0.017 远好于整句 0.053，**无需退回整句定稿**。
+
+### 需求缘起（整句路径的延迟天花板）
+
+T13 之前引擎只有整句识别：VAD 断句 → 整句前向 → 回调。两个缺陷被用户质疑后量化证实：
+
+1. **尾字延迟 = 整句推理耗时，随句长线性涨**。paraformer/cuda 长句（4.7s）≈0.93s（含 VAD 尾
+   250ms），cpu ≈1.5s——破 0.5s 硬指标、长句破 1s。5s 长句按 0.15×句长（cuda）/0.28×句长
+   （cpu）外推更糟。
+2. **首字延迟等于尾字延迟**（整句话说完了，首尾字一起原子出来）——5s 长句首字延迟 ≈ 5.6s，
+   真人感知是"我说完了 5 秒才出第一个字"。
+
+`recognize_stream()` 三后端都有定义（paraformer cache 模式、sherpa OnlineRecognizer 真实现、
+whisper 抛 NotImplementedError）但引擎零调用（engine.py 仅 `recognize`）。RTF 全达标（识别快）
+但出字时机晚——这是「VAD 断句 + 整句识别」架构的天花板。
+
+### 定案
+
+- **后端契约**（`asr/core/backend.py`）：`ASRBackend.supports_streaming = False` +
+  `recognize_stream(self, chunk, is_final=False)`。`is_final=False` 增量喂块返回当前部分文本；
+  `is_final=True` 结束当前流返回最终文本，之后流状态失效（调用方随后 `reset()`）。paraformer
+  与 sherpa `supports_streaming=True`；whisper 保持抛 NotImplementedError。
+- **流式 flush 定稿**（用户拍板）：句末最终文本由流式定稿承担（边界块 `is_final=True` 收尾），
+  尾字延迟压到 ~0.3s 恒达标。**CER 必须 bench 把关**——当时严格 CER 0.059 已在 5% 线附近，
+  有回归风险；实测流式定稿 0.017，反而大幅改善，无回归。
+- **退化**：流式调用抛异常 → 置 `stream_capable=False`，本会话剩余走整句（whisper/异常兜底）。
+  后端不支持流式（whisper）→ 构造时告警降级，不中断主识别。
+- **打断共存**：`interrupt()`/「停下」的 `_gen` 守卫同时管 partial 与 final；流式 cache 在
+  `reset()` 里清空，打断后新会话的 partial 从零开始，不串旧句。
+
+### 实现要点（坑）
+
+- **FunASR cache 模式返回 DELTA 非累计**（`tmp/probe_stream_flush.py` 实测）：`generate(input=chunk,
+  cache=cache, is_final=False)` 的 `res[0]["text"]` 是**本块新增**片段（"明天早"→"上八点"→"开会"），
+  必须内部累加进 `_partial_buf`，`is_final=True` 时返回累加结果并清空。sherpa `get_result()` 本身
+  返回累计（无需累加）。
+- **流式吞吐达标**：paraformer recognize_stream RTF 0.16（4.7s 音频 47×100ms 块 0.73s 处理完），
+  逐块出字远快于实时。
+- **安静文件在流式路径漏断句**（`tmp/dbg_vad_state.py` 实测）：VAD 能量门限 -35dB、最短句 250ms，
+  corpus s01「你好。」（peak 0.039）仅 **2 帧**过阈 < 12 帧 → 被当噪声丢弃 → 句子永不闭合 →
+  与下一文件的语音合并成一句（实测 s01+s02 出 "你好今天天气不错"）。整句路径靠文件末
+  `vad.flush()` 兜住残留缓冲，流式路径**无文件边界**（连续麦克风流）→ 必须让语料响度达标。
+- **归一化只能放大、不能统一压到 0.10**（`bench_streaming` 迭代中踩坑）：把全部文件压到 peak
+  0.10，会把 RMS 在 -34dB 附近的文件（s03/s06/s07）再压低 → 同样跌破 VAD 门限 → 漏断句 → 单
+  文件卡 ~19s 拖垮整趟时序，整句 CER 0.059→0.108。修复：`_read()` 只把 `peak<0.10` 的安静文件
+  放大到 0.10，响亮文件保持原电平（VAD 公平断句、识别电平不被改动）。
+- **bench 的 paced 趟必须连续喂入、不能"喂一文件等一文件"**：后者每文件等 final 的 wait 期间
+  VAD 时间线（`_ts_cur`）不推进、与真实墙钟脱节 → `audio_end` 被低估 → ttfb 虚高且逐文件累积
+  （实测 24 文件后虚高到 1.8s）。连续喂入（文件间靠各自 400ms 尾静音停顿）模拟真实麦克风会话，
+  VAD 时间线无空洞，ttfb 真实。
+
+
 
 ### 探索阶段 T3-T5（已完成）
 - [x] T3 克隆 `voice-asr` 环境并验证 torch/CUDA 可用，快照入档（2026-08-27 通过）

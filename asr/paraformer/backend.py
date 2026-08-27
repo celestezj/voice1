@@ -5,8 +5,10 @@
 首次联网下载模型（modelscope），缓存落 `.cache/modelscope/`。
 - `recognize`：句子级识别（引擎 VAD 断句后调用）。`is_final=True` 关键——数组输入默认
   `is_final=False`，末 chunk 会被丢弃（实测整句截尾缺"技术系"）。
-- `recognize_stream`：FunASR 官方 cache 流式（60ms 粒度逐块增量，跨调用保持状态）。
-  引擎暂以"VAD 断句 + 整句 recognize"为主，此接口留给 T10 帧级实时增强；`reset()` 清 cache。
+- `recognize_stream(chunk, is_final=False)`：FunASR 官方 cache 流式（T13 接入引擎）。
+  **注意**：FunASR `generate` 流式返回的是**增量 delta**（实测"明天早"→"上八点"→"开会"），
+  不是累计假设——本类内部把 delta 拼进 `_partial_buf`，对外统一返回**累计**文本；
+  `is_final=True` 句末收尾返回该句完整文本并清状态。`reset()` 清 cache + partial_buf。
 """
 import os
 
@@ -28,12 +30,14 @@ _CFG = dict(chunk_size=[5, 10, 5], encoder_chunk_look_back=4, decoder_chunk_look
 class ParaformerBackend(ASRBackend):
     name = "paraformer"
     sr = 16000
+    supports_streaming = True
 
     def __init__(self, device="auto", model_id=None):
         self._device = device
         self._model_id = model_id or _MODEL_ID
         self._model = None
         self._cache = None
+        self._partial_buf = ""       # 流式 delta 累积（FunASR 返回增量，须拼接成累计文本）
 
     # -- ASRBackend 协议 ------------------------------------------------
     def load(self):
@@ -58,23 +62,32 @@ class ParaformerBackend(ASRBackend):
         return (res[0]["text"] if isinstance(res, list)
                 else res.get("text", str(res))).strip()
 
-    def recognize_stream(self, chunk):
-        """流式增量（FunASR cache 模式，60ms 粒度逐块输出）。
+    def recognize_stream(self, chunk, is_final=False):
+        """流式增量（T13）：逐块出字 + 句末 flush 定稿。
 
-        跨调用保持 cache 状态；`reset()` 在句子边界 / 打断时清状态。
-        句子级识别请走 `recognize`（is_final=True，不截断）。
+        FunASR `generate` 流式返回**增量 delta**（非累计），内部拼进 `_partial_buf`，
+        对外统一返回**累计**文本（部分/完整）。`is_final=True` 收尾返回完整句文本并清状态。
         """
         if self._cache is None:
             self._cache = {}
         a = np.ascontiguousarray(chunk, dtype=np.float32)
-        res = self._model.generate(input=a, cache=self._cache, is_final=False, **_CFG)
-        return (res[0]["text"] if isinstance(res, list)
-                else res.get("text", str(res))).strip()
+        res = self._model.generate(input=a, cache=self._cache, is_final=is_final, **_CFG)
+        delta = (res[0]["text"] if isinstance(res, list)
+                 else res.get("text", str(res))).strip()
+        self._partial_buf += delta
+        if is_final:
+            final = self._partial_buf
+            self._partial_buf = ""       # 流结束：清累积 + cache（下句从零开始）
+            self._cache = None
+            return final
+        return self._partial_buf
 
     def reset(self):
         """清流式状态（新句子 / interrupt）。"""
         self._cache = None
+        self._partial_buf = ""
 
     def close(self):
         self._model = None
         self._cache = None
+        self._partial_buf = ""

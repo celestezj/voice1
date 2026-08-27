@@ -11,6 +11,11 @@
   即时作废排队任务、触发块丢弃不识别（不等 VAD 断句，避免"打断词排队尾"悖论）；
   正在识别的任务无法中止（整句前向原子），完成后判 `stale=True` 不进普通回调。
   另保留 VAD 断句后整句 `detect()` 兜底（流式 miss 的第二道防线）。
+- **流式逐帧输出（T13）**：`streaming=True` 时（后端须 `supports_streaming`，whisper
+  不支持则降级）worker 对**未断句块**逐块 `recognize_stream` 出 `on_partial` 部分字
+  （"边说边出字"）；**断句边界块**以 `is_final=True` flush 定稿完整句文本——尾字延迟
+  与句长无关（≈ VAD 尾长 + flush 耗时），首字延迟从"整句话说完"压到 ~0.3s。
+  最终文本由流式定稿承担（CER 需 bench 把关）；异常自动退化整句。
 - **`wait()` 语义**：实时场景无 Job；`ingest_file()` 阻塞同步返回逐句结果，bench 兼容。
 - **插桩**：`profile`（逐句时序）/ `debug` 守卫，热路径零埋点。
 """
@@ -22,7 +27,7 @@ import numpy as np
 
 from .audio import EnergyVAD, read_wav, resample_to
 from .backend import get_backend
-from .jobs import SentenceResult
+from .jobs import PartialResult, SentenceResult
 from ..kws.interrupt import get_interrupt_detector
 
 
@@ -32,12 +37,13 @@ class RealtimeASR:
 
     def __new__(cls, backend="paraformer", device="auto", sample_rate=16000,
                 vad_silence_tail_ms=250, profile=False, debug=False,
-                interrupt_words=None):
-        # 单例：backend/device/vad_tail/interrupt_words 任一变更 → 销毁重建；否则同一实例
+                interrupt_words=None, streaming=False):
+        # 单例：backend/device/vad_tail/interrupt_words/streaming 任一变更 → 销毁重建；否则同一实例
         inst = cls._instance
         if inst is not None and (inst._backend_name != backend or inst._device != device
                                  or inst._vad_tail_ms != vad_silence_tail_ms
-                                 or inst._interrupt_words != list(interrupt_words or [])):
+                                 or inst._interrupt_words != list(interrupt_words or [])
+                                 or inst._streaming != bool(streaming)):
             inst.close()
             inst = None
         if inst is None:
@@ -46,7 +52,7 @@ class RealtimeASR:
 
     def __init__(self, backend="paraformer", device="auto", sample_rate=16000,
                  vad_silence_tail_ms=250, profile=False, debug=False,
-                 interrupt_words=None):
+                 interrupt_words=None, streaming=False):
         if getattr(self, "_inited", False):
             return
         self._backend_name = backend or "paraformer"
@@ -56,6 +62,7 @@ class RealtimeASR:
         self._profile = profile
         self._debug = debug
         self._interrupt_words = list(interrupt_words) if interrupt_words else []
+        self._streaming = bool(streaming)
 
         # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）
         self._backend = get_backend(self._backend_name, device=device)
@@ -77,6 +84,13 @@ class RealtimeASR:
             except Exception as e:
                 print("[RealtimeASR] 打断词检测加载失败（旁路关闭，不影响识别）: %s" % e, flush=True)
 
+        # 流式（T13）：streaming=True 且后端支持 → 逐块出字 + 句末 flush 定稿；
+        # 后端不支持（whisper）→ 告警降级为非流式整句，不影响主识别。
+        self._stream_capable = self._streaming and self._backend.supports_streaming
+        if self._streaming and not self._stream_capable:
+            print("[RealtimeASR] 后端 %s 不支持流式，streaming=True 降级为整句识别"
+                  % self._backend_name, flush=True)
+
         self._vad = EnergyVAD(sample_rate=self._sr, silence_tail_ms=vad_silence_tail_ms)
         self._audio_q = queue.Queue(maxsize=8)     # 有界背压
         self._recog_lock = threading.Lock()        # 模型非线程安全
@@ -84,6 +98,7 @@ class RealtimeASR:
         self._gen = 0
         self._shutdown = False
         self._cb = None
+        self._partial_cb = None                    # T13 流式逐块出字回调
         self._sentences = []                       # profile 时收集
         self._next_idx = 1
         self._t0 = time.monotonic()                # 会话起点（时序基准）
@@ -92,8 +107,9 @@ class RealtimeASR:
         self._worker.start()
         self._inited = True
         if self._debug:
-            print("[RealtimeASR] 就绪（backend=%s device=%s sr=%d, VAD 尾长 %dms）"
-                  % (self._backend_name, self._device, self._sr, self._vad_tail_ms), flush=True)
+            print("[RealtimeASR] 就绪（backend=%s device=%s sr=%d, VAD 尾长 %dms%s）"
+                  % (self._backend_name, self._device, self._sr, self._vad_tail_ms,
+                     ", 流式" if self._stream_capable else ""), flush=True)
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -101,6 +117,16 @@ class RealtimeASR:
         """设置句子完成回调 `cb(result: SentenceResult)`。返回旧回调。"""
         old = self._cb
         self._cb = callback
+        return old
+
+    def on_partial(self, callback):
+        """设置流式逐块出字回调 `cb(partial: PartialResult)`（T13，streaming=True 时）。
+
+        说话期间每个音频块返回**累计**部分文本（后端内部拼 delta）；句末以完整结果回调收尾。
+        `streaming=False` / 后端不支持时不会触发。
+        """
+        old = self._partial_cb
+        self._partial_cb = callback
         return old
 
     def ingest(self, audio, source_ts=None):
@@ -237,21 +263,78 @@ class RealtimeASR:
             if gen != self._gen:
                 continue                       # 旧会话块作废
             with self._state_lock:
-                for sent, s_ts, e_ts in self._vad.add(audio, ts):
-                    if self._interrupt_on_detect(sent):
-                        break                   # 打断词命中：该句不识别，本块剩余句子一并作废
-                    # task_gen 用「出队时的块 gen」而非当前 _gen：interrupt() 的
-                    # _gen+=1 可能发生在 worker 处理本块中途（VAD 已含触发词音频），
-                    # 此时该块产出的句子仍属旧会话 → stale 丢弃（T12c 实测修复）。
-                    self._process_sentence_locked(sent, s_ts, e_ts, task_gen=gen)
+                closed = list(self._vad.add(audio, ts))
+                if self._stream_capable:
+                    # T13 流式：未断句块 → 逐块出字；断句边界块 → is_final=True flush 定稿
+                    if not closed:
+                        self._stream_partial(audio, gen, ts)
+                    for sent, s_ts, e_ts in closed:
+                        if self._interrupt_on_detect(sent):
+                            break               # 打断词命中：该句不识别，本块剩余句子一并作废
+                        self._stream_finalize(sent, audio, gen, s_ts, e_ts)
+                else:
+                    for sent, s_ts, e_ts in closed:
+                        if self._interrupt_on_detect(sent):
+                            break               # 打断词命中：该句不识别，本块剩余句子一并作废
+                        # task_gen 用「出队时的块 gen」而非当前 _gen：interrupt() 的
+                        # _gen+=1 可能发生在 worker 处理本块中途（VAD 已含触发词音频），
+                        # 此时该块产出的句子仍属旧会话 → stale 丢弃（T12c 实测修复）。
+                        self._process_sentence_locked(sent, s_ts, e_ts, task_gen=gen)
 
-    def _process_sentence_locked(self, audio, s_ts, e_ts, recog_axis="wall", task_gen=None):
+    def _stream_partial(self, audio, gen, ts):
+        """T13 流式出字：本块未断句 → 后端流式 feed，非空则回调累计部分文本。
+
+        已持 `_state_lock`；feed 持 `_recog_lock`（模型非线程安全）。异常 → 退化为整句
+        （whisper 抛 NotImplementedError / 后端流式出错），不中断主识别。
+        """
+        try:
+            with self._recog_lock:
+                text = self._backend.recognize_stream(audio, is_final=False)
+        except Exception:
+            self._stream_capable = False           # 流式不可用：本会话剩余走整句
+            return
+        if not text or gen != self._gen or self._partial_cb is None:
+            return
+        try:
+            self._partial_cb(PartialResult(text, ts - self._t0, SentenceResult.now() - self._t0))
+        except Exception:
+            if self._debug:
+                import traceback
+                traceback.print_exc()
+
+    def _stream_finalize(self, sent, audio, gen, s_ts, e_ts):
+        """T13 句末定稿：边界块以 is_final=True flush 流式 cache → 完整句文本。
+
+        preset_text 传给 `_process_sentence_locked`（跳过整句重识别——最终文本由流式
+        定稿承担，尾字延迟 ≈ flush 耗时，与句长无关）。flush 失败 → 退化为整句兜底。
+        """
+        try:
+            with self._recog_lock:
+                text = self._backend.recognize_stream(audio, is_final=True)
+                self._backend.reset()              # 清流式状态（paraformer cache / sherpa stream）
+        except Exception:
+            self._stream_capable = False           # 流式不可用：本会话剩余走整句
+            try:
+                self._backend.reset()
+            except Exception:
+                pass
+            self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="wall", task_gen=gen)
+            return
+        self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="wall",
+                                      task_gen=gen, preset_text=text)
+
+    def _process_sentence_locked(self, audio, s_ts, e_ts, recog_axis="wall", task_gen=None,
+                                 preset_text=None):
         """已持 _state_lock。分配 idx → 识别（持 _recog_lock）→ 构造结果 → 回调。
 
         recog_axis：时间轴基准。
           - "wall"（实时流）：recog 时刻 = monotonic 相对 _t0；ttfb 天然含 VAD 尾长 + 识别延迟。
           - "audio"（文件同步）：加速喂入，识别时刻映射到音频轴（断句即识别），
             ttfb = 纯识别耗时，与 feed 加速无关。
+
+        preset_text（T13 流式定稿）：非 None 则跳过整句 recognize——调用方已在
+        `_stream_finalize` 持 `_recog_lock` 完成 flush 定稿；本函数只分配 idx/时序/回调
+        （避免重入锁死，且 recog_end ≈ flush 完成时刻，ttfb 语义不变）。
 
         T12 stale：识别完成后若 `task_gen != self._gen`（识别期间被 interrupt() 打断），
         该结果标记 stale=True，**不进普通回调**。实时流（worker）传**出队块的 gen**
@@ -263,8 +346,11 @@ class RealtimeASR:
         idx = self._next_idx
         self._next_idx += 1
         t1 = SentenceResult.now()
-        with self._recog_lock:
-            text = self._backend.recognize(audio)
+        if preset_text is None:
+            with self._recog_lock:
+                text = self._backend.recognize(audio)
+        else:
+            text = preset_text
         t2 = SentenceResult.now()
         stale = (task_gen != self._gen)       # 识别期间被打断？
         a_start, a_end = s_ts - self._t0, e_ts - self._t0

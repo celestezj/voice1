@@ -131,6 +131,7 @@ asr = RealtimeASR(
     profile=False,               # True 时收集 self._sentences（逐句时序，调试/统计用）
     debug=False,                 # True 时打印加载/打断/逐句诊断信息
     interrupt_words=None,        # 非空则启用打断词旁路，如 ["停下"]（T12）
+    streaming=False,             # True=流式逐帧出字（T13，后端须 supports_streaming）
 )
 ```
 
@@ -143,9 +144,15 @@ asr = RealtimeASR(
 | `profile` | `False` | 收集逐句时序到 `asr._sentences`（含 stale 结果） | `profile=True` |
 | `debug` | `False` | 打印加载/打断/识别诊断 | `debug=True` |
 | `interrupt_words` | `None` | 打断词列表，非空启用 KWS 旁路 | `interrupt_words=["停下"]` |
+| `streaming` | `False` | 流式逐帧出字（T13）。`True` 且后端支持 → 逐块 `on_partial` + 句末 flush 定稿；后端不支持（whisper）→ 告警降级整句 | `streaming=True` |
 
 **单例语义**：同一进程内 `RealtimeASR(...)` 多次调用返回**同一实例**（模型只加载一次）；
-仅当 `backend / device / vad_silence_tail_ms / interrupt_words` 任一**变更**时才销毁重建。
+仅当 `backend / device / vad_silence_tail_ms / interrupt_words / streaming` 任一**变更**
+时才销毁重建。
+
+**`streaming` 一键切换**：`streaming` 变更会销毁重建单例（因为后端模型在前向模式下是否
+走流式 cache 是构造期状态）。流式 vs 非流式只是出字时机不同，**句末最终文本都是整句**
+（流式用 `is_final=True` flush 定稿，非流式直接整句识别）——见 §4.4、§8 对比。
 
 ### 4.2 `on_sentence(cb)` —— 结果回调
 
@@ -190,7 +197,35 @@ def cb(r):
           % (r.idx, r.audio_start, r.audio_end, r.text, r.ttfb, r.stale))
 ```
 
-### 4.4 `ingest(audio, source_ts=None)` —— 实时喂入
+### 4.4 `on_partial(cb)` —— 流式逐块出字回调（T13）
+
+```python
+asr.on_partial(lambda p: print(p.text))     # streaming=True 时生效
+```
+
+- **作用**：注册"边说边出字"回调，`streaming=True` 时，worker 对**未断句块**逐块调
+  `recognize_stream(is_final=False)`，后端返回**累计**部分文本（"明""明天""明天早"…），
+  非空则回调 `PartialResult`。
+- **触发时机**：说话期间每处理一个音频块（100ms）就回调一次；一句话说完（VAD 断句）
+  以 `on_sentence` 的完整结果收尾——**最终文本以 flush 定稿为准**，partial 只供展示。
+- **不触发**：`streaming=False` / 后端不支持流式（whisper 降级）/ 部分文本为空。
+- **与 `on_sentence` 共存**：两者都注册即可——partial 实时滚屏，final 落库。
+- **⚠️ 打断**：`interrupt()` 或说"停下"会作废后续 partial（`_gen` 守卫），回调里
+  `p.audio_start` 会跳变——上层不要缓存累计文本跨句使用。
+
+### 4.5 `PartialResult` —— 流式 partial 回调收到什么
+
+```python
+class PartialResult:    # jobs.py，__slots__
+    text        # 累计部分文本（"明天早"）
+    audio_start # 本块音频起点（相对会话起点 _t0，秒）
+    wall_ts     # 回调时刻（相对 _t0，秒）——首字延迟 = wall_ts - 喂入起点
+```
+
+`wall_ts` 就是实时轴上的"这句第一块被流式处理完的时刻"，用它算**首字延迟**
+（首个非空 partial 的 `wall_ts` 减去音频喂入起点），是 T13 对比流式 vs 非流式的关键。
+
+### 4.6 `ingest(audio, source_ts=None)` —— 实时喂入
 
 ```python
 asr.ingest(audio, source_ts=None)
@@ -207,7 +242,7 @@ asr.ingest(audio, source_ts=None)
 - **T12**：`interrupt_words` 非空时，块先过 KWS `feed()`；命中"停下"→ 立即
   `interrupt()` 并**丢弃本块**（"停下"本身不进识别管线）。
 
-### 4.5 `ingest_file(path, chunk_ms=100)` —— 文件同步识别
+### 4.7 `ingest_file(path, chunk_ms=100)` —— 文件同步识别
 
 ```python
 results = asr.ingest_file("会议录音.wav")
@@ -221,7 +256,7 @@ results = asr.ingest_file("会议录音.wav")
 - **同步阻塞**：在调用线程内完成全部识别才返回（与实时流"喂了就走"不同）。
 - 时间轴用 **audio 轴**（§6），结果 `ttfb` = 纯识别耗时（不含喂入加速），bench 可比。
 
-### 4.6 `interrupt()` —— 打断会话
+### 4.8 `interrupt()` —— 打断会话
 
 ```python
 asr.interrupt()   # 手动打断（换说话人/新会话）；或说"停下"自动触发
@@ -232,7 +267,7 @@ asr.interrupt()   # 手动打断（换说话人/新会话）；或说"停下"自
 - 清空 VAD 缓冲、后端流式状态、KWS 流状态。
 - 新喂入的音频正常识别（新会话）。
 
-### 4.7 `close()` —— 关闭
+### 4.9 `close()` —— 关闭
 
 ```python
 asr.close()   # 幂等；with RealtimeASR(...) as asr: / __del__ / atexit 都兜底
@@ -281,6 +316,13 @@ asr.close()
 
 见 `examples/demonstrate_interrupt.py`——喂多句制造积压、中途说「停下」作废排队任务、
 stale 抑制、打断后恢复，演示脚本有完整注释与参数说明。
+
+### 5.4 流式逐帧出字代码 case（完整可运行）
+
+见 `examples/demonstrate_streaming.py`——`streaming=True` + `on_partial` 边说边出字、
+句末 flush 定稿，同一句话跑流式/非流式对比首字延迟，whisper 降级演示。脚本用**实时节奏
+喂入**（非快进，否则墙钟时序失真）并做了安静文件的响度修复（只放大不压低，注释解释了
+为什么统一压到 peak 0.10 会漏断句）。
 
 ---
 
@@ -347,6 +389,19 @@ stale 抑制、打断后恢复，演示脚本有完整注释与参数说明。
 **验收结果**（T9/T10，24 句语料）：paraformer/cuda 是唯一**三项硬指标全达标**组合
 （CER 0.059 逼近 5%、RTF 0.154、ttfb 0.226s）。whisper/sherpa 的 CER 均超 5%，定位为
 可选项/基线。完整逐句 hyp 对照：`reports/bench_T9_*.txt`、`reports/bench_T10_*.txt`。
+
+**流式 vs 整句出字延迟**（T13，`bench/bench_streaming.py`，同一语料、实时节奏喂入）：
+
+| 设备 | 首字延迟（流式） | 首字延迟（整句） | 尾字延迟（流式） | 尾字延迟（整句） | 流式CER | 整句CER |
+|---|---|---|---|---|---|---|
+| cuda | **0.932s**（max 1.467） | 3.110s（max 5.377） | **0.348s**（max **0.486**） | 0.626s（max 1.022） | **0.017** | 0.053 |
+| cpu | **0.984s**（max 1.482） | 3.405s（max 6.268） | **0.416s**（max **0.580**） | 0.905s（max 1.842） | **0.017** | 0.053 |
+
+- **首字**：流式"边说边出字"，~0.3-0.9s（与句长无关）；整句 = 整句话说完才出字，随句长涨。
+- **尾字**：流式 max 0.486s（cuda）**达标 <0.5s**；整句 max 1.022s 破线。cpu 流式 max 0.580s
+  略超 0.5s（CPU 硬指标 <1s 达标），仍比整句 1.842s 好 3 倍。
+- **CER**：流式定稿 0.017 优于整句 0.053（FunASR 流式定稿即整句级质量，无 CER 代价）。
+- 完整报告：`reports/bench_streaming_T13_paraformer_{cuda,cpu}.txt`。
 
 **离线**：三个后端模型首次联网下载后缓存项目内 `.cache/`，运行期零网络。
 

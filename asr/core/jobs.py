@@ -35,3 +35,19 @@ class SentenceResult:
     @staticmethod
     def now():
         return time.monotonic()
+
+
+class PartialResult:
+    """流式逐块出字回调的结果对象（T13，说话期间"边说边出字"）。
+
+    - text        累计部分文本（后端内部拼 delta，非增量）——供实时展示
+    - audio_start 本块起点（会话 _t0 起的秒，wall 轴）
+    - wall_ts     本回调发生的墙钟（_t0 起），首字延迟 = 首个非空 partial 的 wall_ts
+    """
+
+    __slots__ = ("text", "audio_start", "wall_ts")
+
+    def __init__(self, text, audio_start, wall_ts):
+        self.text = text
+        self.audio_start = audio_start
+        self.wall_ts = wall_ts

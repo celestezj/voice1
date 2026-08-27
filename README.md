@@ -93,6 +93,15 @@ asr.close()                                          # 幂等；with / __del__ �
 > CER 口径：严格 = 去标点；规范 = 去标点 + 繁简统一 + 中文/阿拉伯数字归一（whisper 的数字/繁体形态差异归因用）。
 > VAD tail 权衡：250ms（实时延迟达标、CER 0.059）vs 600ms（CER 0.047 达标、延迟超标，离线转录用）。无单一值同时达标，详见 ADR T10。
 
+**流式 vs 整句出字延迟**（T13，`streaming=True`，实时节奏喂入同一语料）：
+
+| 设备 | 首字（流式） | 首字（整句） | 尾字（流式） | 尾字（整句） | 流式CER |
+|---|---|---|---|---|---|
+| cuda | **0.932s** | 3.110s | **0.348s**（max 0.486 达标） | 0.626s（max 1.022 破线） | **0.017** |
+| cpu | **0.984s** | 3.405s | **0.416s**（max 0.580） | 0.905s（max 1.842） | **0.017** |
+
+流式逐块出字（`on_partial`）+ 句末 flush 定稿，首字延迟与句长无关；整句首字=整句话说完才出字。
+
 ## 目录结构
 
 ```
@@ -108,8 +117,8 @@ asr/
 ├── paraformer/  ParaformerBackend（默认主力，FunASR 流式 + cache 增量）
 ├── whisper/     WhisperBackend（可选，离线，本地缓存路径加载）
 └── sherpa/      SherpaBackend（CPU 基线，sherpa-onnx zipformer）
-bench/           bench_asr.py（--backend/--device/--tail/--tag）
-examples/        transcribe_file / record_mic / demonstrate_interrupt（代码 case）
+bench/           bench_asr.py（整句 CER/RTF）+ bench_streaming.py（流式 vs 整句出字延迟）
+examples/        transcribe_file / record_mic / demonstrate_interrupt / demonstrate_streaming（代码 case）
 preload_asr.py   权重预下载（一次性联网）
 docs/            ADR（选型/标定）/ engine-guide（引擎使用与原理）/ 环境版本锁定
 assets/corpus/   CER 验收语料（24 句 + manifest.json）
@@ -119,8 +128,9 @@ assets/corpus/   CER 验收语料（24 句 + manifest.json）
 
 - **尾字延迟 vs CER 权衡**（T10）：无单一 VAD tail 同时达标；实时 250ms、离线 600ms。
 - **paraformer 短句**：sherpa 基线对极短句有空文本/半句缺陷；paraformer/whisper 正常。
-- **whisper**：离线非流式，不支持"边说边出字"（引擎回退积累块 + 整句识别）。
-- **流式增量**：paraformer cache 模式已具备（60ms 粒度），引擎当前走"VAD 断句 + 整句识别"；逐帧实时输出是后续增强点。
+- **whisper**：离线非流式，不支持"边说边出字"（`streaming=True` 会告警并降级为整句识别）。
+- **流式已实现**（T13）：`streaming=True` 逐块出字 + 句末 flush 定稿（见上表）；缺省 `streaming=False` 仍是整句识别。流式定稿 CER 0.017 优于整句 0.053，无 CER 代价。
+- **安静短句在流式路径可能漏断句**：VAD 能量门限 -35dB/最短句 250ms，过静音短句（如 corpus s01 原始电平）会被当噪声丢弃 → 与下一句合并（整句路径靠文件末 flush 兜底，流式无文件边界）。demo/bench 已做"只放大安静文件到 peak 0.10"的响度归一；真实麦克风电平通常达标。
 - **打断词命中需尾随音频**：流式 KWS 要 ~0.2-0.4s 尾随音频才能收尾解码（真实麦克风持续采样天然满足）；若音频流在「停下」后立即结束，命中延迟到后续音频到达。
 - **KWS 对喂入响度敏感**：过静音的音频（peak~0.04、低 SNR）若被放大到 peak≥0.15，噪声底抬高会导致「停下」漏检；VAD 又会把过静音句子当噪声丢弃。引擎不自动归一（麦克风电平通常达标）；demo 归一至 peak 0.10 为双检公共区间（见 ADR T12）。
 - **打断词依赖 sherpa-onnx + pypinyin**：`interrupt_words` 非空但两者缺失时，打断旁路降级为"无打断"（仅告警，不影响主识别）。

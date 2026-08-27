@@ -29,6 +29,7 @@ class ASRBackend(ABC):
 
     name = ""
     sr = 16000                     # 采样率：ASR 链路统一 16kHz（麦克风/模型）
+    supports_streaming = False     # 是否支持流式增量（recognize_stream）；whisper=False
 
     @abstractmethod
     def load(self):
@@ -42,10 +43,13 @@ class ASRBackend(ABC):
         """
         raise NotImplementedError
 
-    def recognize_stream(self, chunk):
-        """流式增量识别（可选，软目标"边说边出字"）。
+    def recognize_stream(self, chunk, is_final=False):
+        """流式增量识别（T13 接入引擎，逐块出字 + 句末 flush 定稿）。
 
-        不实现的后端抛 NotImplementedError，引擎回退为"积累块 + 整句 recognize"。
+        - `is_final=False`（默认）：喂一块增量音频，返回**累计**部分文本（非增量 delta）。
+        - `is_final=True`：结束当前流，返回该句**最终完整文本**；流状态随即失效，
+          调用方随后 `reset()`（paraformer 清 cache、sherpa 重建 stream）。
+        - 非流式后端（whisper）抛 NotImplementedError，引擎回退为"积累块 + 整句 recognize"。
         """
         raise NotImplementedError
 

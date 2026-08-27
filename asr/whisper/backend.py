@@ -24,6 +24,7 @@ _REPO_ID = "Systran/faster-whisper-medium"
 class WhisperBackend(ASRBackend):
     name = "whisper"
     sr = 16000
+    supports_streaming = False     # 离线非流式：recognize_stream 抛 NotImplementedError
 
     def __init__(self, device="auto", model_id=None, language="zh", beam_size=5):
         self._device = device
@@ -70,7 +71,7 @@ class WhisperBackend(ASRBackend):
                                              beam_size=self._beam_size)
         return "".join(seg.text.strip() for seg in segments).strip()
 
-    def recognize_stream(self, chunk):
+    def recognize_stream(self, chunk, is_final=False):
         raise NotImplementedError(
             "faster-whisper 离线模型不支持流式增量；引擎回退积累块 + 整句 recognize")
 
