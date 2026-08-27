@@ -31,6 +31,27 @@ def list_devices():
               % (i, d["name"], d["max_output_channels"], d["max_input_channels"]))
 
 
+def check_mic_signal(device, sr, seconds=1.0):
+    """开 1 秒采集实测设备信号电平，返回 RMS（float，0 表示静音）。
+
+    枚举只能证明"设备声称是输入"，不能证明"真采得到声音"——坏的/被禁用的麦克风照样
+    会被枚举出来。本函数实测区分：真麦克风必有底噪（RMS 通常 >-70dBFS），无效/禁用
+    设备近乎数字静音（RMS≈0）。打不开流返回 None。
+    """
+    buf = []
+    def cb(indata, frames, t, status):
+        buf.append(indata[:, 0].copy())
+    try:
+        with sd.InputStream(samplerate=sr, channels=1, device=device, callback=cb):
+            time.sleep(seconds)
+    except sd.PortAudioError:
+        return None
+    if not buf:
+        return 0.0
+    x = np.concatenate(buf)
+    return float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
+
+
 def pick_input_device(arg):
     """校验并选择录音输入设备，返回 (设备索引, 原生采样率)。
 
@@ -78,6 +99,18 @@ def main():
     dev = sd.query_devices(input_idx)
     print("使用输入设备 [%d] %s（原生采样率 %d Hz）%s"
           % (input_idx, dev["name"], dev_sr, "[流式]" if args.streaming else ""), flush=True)
+
+    # 实测信号（区分真麦克风 vs 无效/被禁用的输入设备；坏设备在模型加载前就退出）
+    rms = check_mic_signal(input_idx, dev_sr)
+    if rms is None:
+        print("错误：打不开设备 %s 的输入流，请换 --input-device。" % dev["name"], flush=True)
+        sys.exit(1)
+    if rms < 1e-4:                        # ~ -80dBFS：近乎数字静音 → 无效/禁用
+        print("警告：设备 %s 几乎采不到声音（RMS %.1f dBFS）——可能是摄像头无内置麦克风"
+              "或麦克风被禁用，请换 --input-device 或接入真实麦克风。"
+              % (dev["name"], 20 * np.log10(rms + 1e-12)), flush=True)
+        sys.exit(1)
+    print("麦克风信号正常（RMS %.1f dBFS）" % (20 * np.log10(rms + 1e-12)), flush=True)
 
     asr = RealtimeASR(backend=args.backend, device=args.device, streaming=args.streaming,
                       profile=True)
