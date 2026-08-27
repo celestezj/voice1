@@ -19,7 +19,7 @@ python preload_asr.py
 python bench/bench_asr.py --backend paraformer --device cuda --tag my
 
 # 4) 跑起来（中文输出加 PYTHONIOENCODING=utf-8）
-python examples/transcribe_file.py 音频.wav --device cuda   # 文件转写
+python examples/transcribe_file.py 音频.wav --device cuda [--streaming]   # 文件转写（wav/mp3/flac/ogg；--streaming 流式逐块出字）
 python examples/record_mic.py --device cuda                  # 麦克风实时识别（sounddevice）
 ```
 
@@ -136,7 +136,7 @@ asr/
 │   ├── engine.py   RealtimeASR（单例/worker/队列/VAD/代际/lifecycle/打断词旁路）
 │   ├── jobs.py     SentenceResult（__slots__ 时序字段，含 stale）
 │   ├── backend.py  ASRBackend ABC + get_backend 惰性加载
-│   └── audio.py    read_wav / resample_to / EnergyVAD
+│   └── audio.py    read_audio（wav/mp3/flac/ogg…）/ resample_to / EnergyVAD
 ├── kws/        打断词旁路（T12）
 │   ├── interrupt.py   InterruptDetector ABC + get_interrupt_detector 惰性加载
 │   └── sherpa.py      SherpaKwsDetector（zipformer 3.3M int8，拼音建模单元）
@@ -155,7 +155,7 @@ assets/corpus/   CER 验收语料（24 句 + manifest.json）
 - **尾字延迟 vs CER 权衡**（T10）：无单一 VAD tail 同时达标；实时 250ms、离线 600ms。
 - **paraformer 短句**：sherpa 基线对极短句有空文本/半句缺陷；paraformer/whisper 正常。
 - **whisper**：离线非流式，不支持"边说边出字"（`streaming=True` 会告警并降级为整句识别）。
-- **流式已实现**（T13）：`streaming=True` 逐块出字 + 句末 flush 定稿（见上表）；缺省 `streaming=False` 仍是整句识别。流式定稿 CER 0.017 优于整句 0.053，无 CER 代价。
+- **流式已实现**（T13）：`streaming=True` 逐块出字 + 句末 flush 定稿（见上表）；缺省 `streaming=False` 仍是整句识别。流式定稿 CER 0.017 优于整句 0.053，无 CER 代价。**文件同步也走流式**（`ingest_file` 随引擎模式；命令行 `transcribe_file.py --streaming`）。
 - **安静短句在流式路径可能漏断句**：VAD 能量门限 -35dB/最短句 250ms，过静音短句（如 corpus s01 原始电平）会被当噪声丢弃 → 与下一句合并（整句路径靠文件末 flush 兜底，流式无文件边界）。demo/bench 已做"只放大安静文件到 peak 0.10"的响度归一；真实麦克风电平通常达标。
 - **打断词命中需尾随音频**：流式 KWS 要 ~0.2-0.4s 尾随音频才能收尾解码（真实麦克风持续采样天然满足）；若音频流在「停下」后立即结束，命中延迟到后续音频到达。
 - **KWS 对喂入响度敏感**：过静音的音频（peak~0.04、低 SNR）若被放大到 peak≥0.15，噪声底抬高会导致「停下」漏检；VAD 又会把过静音句子当噪声丢弃。引擎不自动归一（麦克风电平通常达标）；demo 归一至 peak 0.10 为双检公共区间（见 ADR T12）。

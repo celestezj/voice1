@@ -28,13 +28,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from asr import RealtimeASR
-from asr.core.audio import read_wav, resample_to
+from asr.core.audio import read_audio, resample_to
 
 SR = 16000
 
 
 def load16k(path):
-    sr, data = read_wav(path)
+    sr, data = read_audio(path)
     if sr != SR:
         data = resample_to(data, sr, SR)
     data = np.ascontiguousarray(data, dtype=np.float32)

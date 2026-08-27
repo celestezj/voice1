@@ -17,6 +17,7 @@
 | sherpa_onnx | 1.13.6 | CPU 轻量基线 |
 | onnxruntime | 1.23.2 | sherpa 依赖 |
 | huggingface_hub | 0.36.2 | whisper 模型源 |
+| soundfile | 0.14.0 | 非 WAV（mp3/flac/ogg）解码（`read_audio`） |
 
 ## 从零复现
 

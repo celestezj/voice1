@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""音频工具：读 WAV、重采样、能量 VAD 断句。
+"""音频工具：读音频（WAV/MP3/FLAC/OGG…）、重采样、能量 VAD 断句。
 
-core 只依赖 numpy + scipy（重采样），不 import 任何推理框架。
+core 只依赖 numpy + scipy（重采样），不 import 任何推理框架；非 WAV 解码
+懒加载 soundfile（libsndfile 绑定，轻量），WAV 走标准库 wave 零依赖。
 VAD 是 ASR 的"分句器"——静音尾长（silence_tail_ms）是延迟-准确率的旋钮：
 太小→断句过碎；太大→尾字延迟变长。参数化并实测标定（T10）。
 """
@@ -22,6 +23,29 @@ def read_wav(path):
     if nch > 1:                      # 取均值转单声道
         data = data.reshape(-1, nch).mean(axis=1)
     return sr, data
+
+
+def read_audio(path):
+    """读取任意受支持音频（wav/mp3/flac/ogg…）→ (sr, 1D float32 mono)。
+
+    WAV 走标准库 wave（零依赖快路径）；非 WAV 用 soundfile（libsndfile 自带
+    mp3/flac/ogg 解码，实测可读 32k mp3），缺失时给可操作报错。文件不存在等
+    OSError 原样上抛（不是"非 WAV"，不吞）。
+    """
+    try:
+        return read_wav(path)
+    except (wave.Error, EOFError):       # 非 RIFF / 截断 → 交 soundfile
+        try:
+            import soundfile as sf
+        except ImportError:
+            raise ImportError(
+                "非 WAV 音频需 soundfile（`pip install soundfile`，自带 libsndfile 解 mp3/flac/ogg）")
+        data, sr = sf.read(path, dtype="float32", always_2d=True)
+        if data.shape[1] > 1:            # 多声道取均值转单声道
+            data = data.mean(axis=1)
+        else:
+            data = data[:, 0]
+        return int(sr), np.ascontiguousarray(data, dtype=np.float32)
 
 
 def resample_to(audio, src_sr, dst_sr):

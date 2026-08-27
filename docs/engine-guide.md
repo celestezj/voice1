@@ -34,7 +34,7 @@
 
 要点速记：
 - **引擎不采集音频**，只消费 `ingest()` 喂进来的 16kHz float32 块。采集由调用方做
-  （`record_mic.py` 用 sounddevice，`transcribe_file.py` 用 `read_wav`）。
+  （`record_mic.py` 用 sounddevice，`transcribe_file.py` 用 `read_audio`）。
 - **chunk ≠ 识别任务**。喂多少块由调用方定；VAD 把块**聚合成句**，一句才触发一次
   `recognize`。
 - **实时回调 = worker 线程调用**，与喂入方（主线程）异步。
@@ -94,8 +94,8 @@ with sd.InputStream(samplerate=16000, channels=1, callback=cb):
 通常 10-50ms 一批；可显式 `blocksize=` 指定）。**chunk 多大完全由调用方决定**——引擎
 只要求是 16kHz float32。
 
-**文件**（`examples/transcribe_file.py`）：`ingest_file()` 内部把 wav 切成 100ms 子块，
-见 §4.5。
+**文件**（`examples/transcribe_file.py`）：`ingest_file()` 内部把音频（wav/mp3…）切成 100ms 子块，
+见 §4.7。
 
 ### 一个 chunk = 一次识别任务吗？
 
@@ -248,10 +248,14 @@ asr.ingest(audio, source_ts=None)
 results = asr.ingest_file("会议录音.wav")
 ```
 
-- **行为**：读整个 wav → 重采样到 16k → **切成 `chunk_ms`（默认 100ms）子块** →
-  逐块喂 `VAD.add` → 断出句子逐句识别 → 最后 `flush()` 吐出残留缓冲 → 返回全部
-  `SentenceResult`。
-- **一个 wav 不是"一个 chunk/一个任务"**：它被切成多个子块喂 VAD，VAD 再聚合成若干
+- **行为**：读整个音频（**wav/mp3/flac/ogg…**，非 WAV 走 soundfile）→ 重采样到 16k →
+  **切成 `chunk_ms`（默认 100ms）子块** → 逐块喂 `VAD.add` → 断出句子逐句识别 →
+  最后 `flush()` 吐出残留缓冲 → 返回全部 `SentenceResult`。
+- **流式模式**（引擎以 `streaming=True` 构造时）：文件也走流式——未断句块逐块
+  `on_partial` 出字、断句边界块 flush 定稿（CER 0.017，与实时流一致）；句首 ttfb ≈
+  flush 耗时（audio 轴），文件末无静音尾的尾句由 `flush()` 整句兜底。whisper 不支持
+  流式 → 自动降级整句。
+- **一个文件不是"一个 chunk/一个任务"**：它被切成多个子块喂 VAD，VAD 再聚合成若干
   句，**每句 = 一次识别**。长音频 → 多句结果。
 - **同步阻塞**：在调用线程内完成全部识别才返回（与实时流"喂了就走"不同）。
 - 时间轴用 **audio 轴**（§6），结果 `ttfb` = 纯识别耗时（不含喂入加速），bench 可比。

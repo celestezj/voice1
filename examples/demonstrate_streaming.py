@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from asr import RealtimeASR
-from asr.core.audio import read_wav, resample_to
+from asr.core.audio import read_audio, resample_to
 
 SR = 16000
 CHUNK = int(SR * 0.1)
@@ -43,7 +43,7 @@ def load16k(path):
     （T13 bench 实测：整句 CER 0.059→0.108）。所以只放大不缩小：安静文件拉响、
     响亮文件保持原电平，VAD 对全部语料公平断句且识别电平不被改动。
     """
-    sr, data = read_wav(path)
+    sr, data = read_audio(path)
     if sr != SR:
         data = resample_to(data, sr, SR)
     data = np.ascontiguousarray(data, dtype=np.float32)

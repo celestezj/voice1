@@ -60,7 +60,7 @@ asr/
 │   ├── engine.py   RealtimeASR（单例/常驻 worker 线程+有界队列/VAD 断句/lifecycle/打断词旁路）
 │   ├── jobs.py     SentenceResult（…/ttfb/stale）+ PartialResult（T13，on_partial 流式出字）
 │   ├── backend.py  ASRBackend（ABC：load/recognize/recognize_stream/reset/close）+ get_backend(name) 惰性加载
-│   └── audio.py    音频工具（read_wav/resample_to/EnergyVAD 断句状态机）
+│   └── audio.py    音频工具（read_audio 通用解码 wav/mp3…、read_wav、resample_to、EnergyVAD 断句状态机）
 ├── kws/        打断词旁路（T12）
 │   ├── interrupt.py   InterruptDetector ABC（load/feed/detect/reset/close）+ get_interrupt_detector
 │   └── sherpa.py      SherpaKwsDetector（zipformer 3.3M int8；feed 流式主路径 / detect 兜底）

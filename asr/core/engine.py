@@ -25,7 +25,7 @@ import time
 
 import numpy as np
 
-from .audio import EnergyVAD, read_wav, resample_to
+from .audio import EnergyVAD, read_audio, resample_to
 from .backend import get_backend
 from .jobs import PartialResult, SentenceResult
 from ..kws.interrupt import get_interrupt_detector
@@ -165,10 +165,12 @@ class RealtimeASR:
     def ingest_file(self, path, chunk_ms=100):
         """同步识别整个音频文件（重采样 16k + VAD 断句 + 逐句识别）。
 
-        阻塞；返回 `[SentenceResult, ...]`。bench 主用。
+        `streaming=True` 构造的引擎：文件也走流式——未断句块逐块 `_stream_partial`
+        出字（`on_partial` 实时回调）、断句边界块 flush 定稿，与实时流一致；
+        整句/降级路径维持现状。阻塞；返回 `[SentenceResult, ...]`。bench 主用。
         """
         self._check_alive()
-        sr, data = read_wav(path)
+        sr, data = read_audio(path)        # wav/mp3/flac/ogg 通用解码（非 WAV 走 soundfile）
         data = resample_to(data, sr, self._sr)
         # 文件 t=0 对齐会话起点 _t0 → 结果时间戳 = 文件内相对秒（正数，bench 可比）
         base_ts = self._t0
@@ -177,8 +179,21 @@ class RealtimeASR:
         with self._state_lock:
             for i in range(0, len(data), chunk):
                 seg = data[i:i + chunk]
-                for sent, s_ts, e_ts in self._vad.add(seg, base_ts + i / self._sr):
-                    results.append(self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="audio"))
+                closed = list(self._vad.add(seg, base_ts + i / self._sr))
+                if self._stream_capable:
+                    # 文件流式：镜像 worker 路径（T13）——未断句块出字、断句块 flush 定稿
+                    if not closed:
+                        self._stream_partial(seg, self._gen, base_ts + i / self._sr)
+                    for sent, s_ts, e_ts in closed:
+                        if self._interrupt_on_detect(sent):
+                            break
+                        results.append(self._stream_finalize(sent, seg, self._gen, s_ts, e_ts,
+                                                             recog_axis="audio"))
+                else:
+                    for sent, s_ts, e_ts in closed:
+                        if self._interrupt_on_detect(sent):
+                            break
+                        results.append(self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="audio"))
             for sent, s_ts, e_ts in self._vad.flush(base_ts + len(data) / self._sr):
                 results.append(self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="audio"))
         return results
@@ -302,11 +317,14 @@ class RealtimeASR:
                 import traceback
                 traceback.print_exc()
 
-    def _stream_finalize(self, sent, audio, gen, s_ts, e_ts):
+    def _stream_finalize(self, sent, audio, gen, s_ts, e_ts, recog_axis="wall"):
         """T13 句末定稿：边界块以 is_final=True flush 流式 cache → 完整句文本。
 
         preset_text 传给 `_process_sentence_locked`（跳过整句重识别——最终文本由流式
         定稿承担，尾字延迟 ≈ flush 耗时，与句长无关）。flush 失败 → 退化为整句兜底。
+
+        recog_axis：worker 实时流传 "wall"（默认）；`ingest_file` 文件同步传 "audio"
+        （ttfb = 纯 flush 耗时，与喂入速度无关，bench 可比）。
         """
         try:
             with self._recog_lock:
@@ -318,10 +336,9 @@ class RealtimeASR:
                 self._backend.reset()
             except Exception:
                 pass
-            self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="wall", task_gen=gen)
-            return
-        self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="wall",
-                                      task_gen=gen, preset_text=text)
+            return self._process_sentence_locked(sent, s_ts, e_ts, recog_axis=recog_axis, task_gen=gen)
+        return self._process_sentence_locked(sent, s_ts, e_ts, recog_axis=recog_axis,
+                                             task_gen=gen, preset_text=text)
 
     def _process_sentence_locked(self, audio, s_ts, e_ts, recog_axis="wall", task_gen=None,
                                  preset_text=None):
