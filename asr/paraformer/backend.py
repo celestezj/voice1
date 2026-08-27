@@ -2,7 +2,8 @@
 """ParaformerBackend：FunASR paraformer-zh-streaming 主力后端。
 
 定位：GPU 主力（T4 实测 GPU RTF 低、CER 最优），类比 voice0 的 `melo/`。
-首次联网下载模型（modelscope），缓存落 `.cache/modelscope/`。
+首次联网下载模型（modelscope）缓存落 `.cache/modelscope/`；**此后加载走本地路径零网络**
+（`_local_model_dir`，避开每次启动的 hub 文件清单请求）。
 - `recognize`：句子级识别（引擎 VAD 断句后调用）。`is_final=True` 关键——数组输入默认
   `is_final=False`，末 chunk 会被丢弃（实测整句截尾缺"技术系"）。
 - `recognize_stream(chunk, is_final=False)`：FunASR 官方 cache 流式（T13 接入引擎）。
@@ -21,7 +22,8 @@ _PROJ = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ.setdefault("MODELSCOPE_CACHE", os.path.join(_PROJ, ".cache", "modelscope"))
 os.environ.setdefault("MODELSCOPE_HUB_CACHE", os.path.join(_PROJ, ".cache", "modelscope"))
 
-_MODEL_ID = "paraformer-zh-streaming"
+_MODEL_ID = "paraformer-zh-streaming"          # FunASR 别名（映射到下方 hub id）
+_MODEL_HUB_ID = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
 
 # 流式 chunk 参数：encoder 5帧(50ms) / decoder 10帧(100ms)，look_back 带历史上下文
 _CFG = dict(chunk_size=[5, 10, 5], encoder_chunk_look_back=4, decoder_chunk_look_back=1)
@@ -39,6 +41,27 @@ class ParaformerBackend(ASRBackend):
         self._cache = None
         self._partial_buf = ""       # 流式 delta 累积（FunASR 返回增量，须拼接成累计文本）
 
+    @staticmethod
+    def _local_model_dir():
+        """优先本地缓存路径（离线零网络）；缺失返回 None 走 hub 下载。
+
+        modelscope 缓存布局：`{MODELSCOPE_CACHE}/models/iic--<name>/snapshots/<rev>/`。
+        直接喂 AutoModel 本地路径可**完全绕开 hub 文件清单请求**（实测把端点设成
+        不可达地址仍加载成功；用 model_id 则每次启动都查 `/repo/files`）。
+        """
+        root = os.path.join(_PROJ, ".cache", "modelscope", "models")
+        if os.path.isdir(root):
+            for d in sorted(os.listdir(root)):
+                if "paraformer" not in d:
+                    continue                     # 只认本模型缓存，避免误扫其他 modelscope 模型
+                snap = os.path.join(root, d, "snapshots")
+                if os.path.isdir(snap):
+                    for rev in sorted(os.listdir(snap)):
+                        cand = os.path.join(snap, rev)
+                        if os.path.isfile(os.path.join(cand, "model.pt")):
+                            return cand
+        return None
+
     # -- ASRBackend 协议 ------------------------------------------------
     def load(self):
         try:
@@ -53,7 +76,9 @@ class ParaformerBackend(ASRBackend):
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             except Exception:
                 device = "cpu"
-        self._model = AutoModel(model=self._model_id, device=device, disable_update=True)
+        # 本地缓存优先（离线零网络，满足硬指标"权重缓存后零网络请求"）；缺失才走 hub
+        model = self._local_model_dir() or self._model_id
+        self._model = AutoModel(model=model, device=device, disable_update=True)
 
     def recognize(self, audio):
         """整段（句子级）识别。is_final=True：末 chunk 不截断。"""

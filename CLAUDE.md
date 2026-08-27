@@ -44,6 +44,11 @@
 - **stale 的 task_gen 必须用「出队块的 gen」**（T12c 实测竞态）：`_process_sentence_locked(..., task_gen=出队gen)`。若用处理时的当前 `_gen`，interrupt 的 `_gen+=1` 恰在 worker 处理该块中途发生时，块内 VAD 已含的打断词音频会以新代际漏入管线（paraformer 把「停下」误识别为"影响下"）。
 - **KWS 建模单元是拼音**：keywords 文件写 `t íng x ià @停下`，汉字→音节串用 pypinyin `to_initials/to_finals_tone(strict=False)` 自建转换（组合声母/带调韵母不拆）；**不能用 `text2token`**（会拆 `sh`→`s h`）。命中需 ~0.2-0.4s 尾随音频收尾解码（麦克风天然满足）。
 - **KWS 对喂入响度敏感（T12d）**：静音文件放大到 peak≥0.15 会漏检「停下」（噪声底抬高）；VAD（门限 -35dB）又会丢过静音句。引擎不归一；demo 归一至 peak 0.10 为双检公共区间。
+- **FunASR 每次启动查 hub 文件清单，须本地路径加载（T15）**：`AutoModel(model=model_id)`
+  即使权重已缓存也发 `/api/v1/models/.../repo/files` 核对清单（日志见 "Downloading 11 files"），
+  离线时重试失败——违反"权重缓存后零网络"。paraformer 后端 `_local_model_dir()` 扫
+  `.cache/modelscope/models/*/snapshots/*/model.pt`，命中直接喂**本地路径**（实测端点
+  设成不可达地址仍加载成功）。写新后端/改加载路径时别丢"本地优先"。
 - **FunASR 流式 cache 返回 DELTA 非累计（T13）**：`recognize_stream(chunk, is_final=False)` 返回的是本块**新增**片段（"明天早"→"上八点"→"开会"），不是累计文本。后端必须内部累加（`_partial_buf`），`is_final=True` 返回累加结果并清 cache。sherpa `get_result()` 本身累计。写新后端时别把 delta 当累计回调给上层。
 - **流式 flush 持锁边界（T13）**：worker 流式路径在 `_state_lock` 内、持 `_recog_lock` 调 `recognize_stream(is_final=True)` 完成定稿，随后 `_process_sentence_locked(..., preset_text=text)` **跳过整句 recognize**——避免 `_recog_lock` 重入死锁。改这段时别让 flush 与整句识别抢锁。
 - **安静文件流式漏断句 + 归一化只放大不缩小（T13）**：VAD 门限 -35dB/最短句 250ms，过静音短句（corpus s01/s04 原始 RMS<-38dB，仅 2~5 帧过阈）被当噪声丢弃 → 流式路径（无文件末 flush 兜底）句子永不闭合、与下一句合并。demo/bench 对语料**只放大** peak<0.10 的文件到 0.10（响亮文件保持原电平）——**别统一压到 0.10**，否则 RMS 在 -34dB 附近的文件（s03/s06/s07）跌破门限同样漏断句，单文件卡 ~19s 拖垮整趟 bench（整句 CER 0.059→0.108）。
