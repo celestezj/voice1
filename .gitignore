@@ -1,0 +1,23 @@
+# 生成的音频文件（体积大，不入库）
+audio/
+
+# 生成的时序报告（交互式 HTML 等）
+reports/
+
+# HF/modelscope 权重缓存 / bench 结构化数据（本项目内，不入库）
+.cache/
+
+# 第三方仓库（clone/解包到此，体积大，不入库）
+third_party/
+
+# 诊断/临时脚本与产物（调试 scratch，不属源码，不入库）
+tmp/
+
+# 录音产物 / 测试语料原始音频（大文件不入库，语料文本源可入 assets/）
+*.wav
+
+# Python
+__pycache__/
+
+# Claude Code 本地配置（含机器相关权限，不入库）
+.claude/

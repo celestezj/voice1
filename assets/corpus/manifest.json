@@ -1,0 +1,122 @@
+[
+  {
+    "id": 1,
+    "text": "你好。",
+    "wav": "E:/temp/voice1/assets/corpus\\s01.wav"
+  },
+  {
+    "id": 2,
+    "text": "今天天气不错。",
+    "wav": "E:/temp/voice1/assets/corpus\\s02.wav"
+  },
+  {
+    "id": 3,
+    "text": "我们走吧。",
+    "wav": "E:/temp/voice1/assets/corpus\\s03.wav"
+  },
+  {
+    "id": 4,
+    "text": "请稍等一下。",
+    "wav": "E:/temp/voice1/assets/corpus\\s04.wav"
+  },
+  {
+    "id": 5,
+    "text": "明天早上八点开会。",
+    "wav": "E:/temp/voice1/assets/corpus\\s05.wav"
+  },
+  {
+    "id": 6,
+    "text": "北京是中国的首都。",
+    "wav": "E:/temp/voice1/assets/corpus\\s06.wav"
+  },
+  {
+    "id": 7,
+    "text": "这台电脑的配置很高。",
+    "wav": "E:/temp/voice1/assets/corpus\\s07.wav"
+  },
+  {
+    "id": 8,
+    "text": "周末我们一起去看电影怎么样。",
+    "wav": "E:/temp/voice1/assets/corpus\\s08.wav"
+  },
+  {
+    "id": 9,
+    "text": "天气转凉了，出门记得加件衣服。",
+    "wav": "E:/temp/voice1/assets/corpus\\s09.wav"
+  },
+  {
+    "id": 10,
+    "text": "老王退休后每天在小区里遛狗。",
+    "wav": "E:/temp/voice1/assets/corpus\\s10.wav"
+  },
+  {
+    "id": 11,
+    "text": "请把音量调大一点，我听不太清楚。",
+    "wav": "E:/temp/voice1/assets/corpus\\s11.wav"
+  },
+  {
+    "id": 12,
+    "text": "世界那么大，我想去看看。",
+    "wav": "E:/temp/voice1/assets/corpus\\s12.wav"
+  },
+  {
+    "id": 13,
+    "text": "这道数学题怎么解，老师你能再讲一遍吗。",
+    "wav": "E:/temp/voice1/assets/corpus\\s13.wav"
+  },
+  {
+    "id": 14,
+    "text": "我的手机号码是一三八零零零一二三四五。",
+    "wav": "E:/temp/voice1/assets/corpus\\s14.wav"
+  },
+  {
+    "id": 15,
+    "text": "这个月的销售业绩比上个月提高了百分之二十。",
+    "wav": "E:/temp/voice1/assets/corpus\\s15.wav"
+  },
+  {
+    "id": 16,
+    "text": "报告显示，二季度国内生产总值同比增长百分之六点五。",
+    "wav": "E:/temp/voice1/assets/corpus\\s16.wav"
+  },
+  {
+    "id": 17,
+    "text": "这款软件的下载量已经突破一亿次。",
+    "wav": "E:/temp/voice1/assets/corpus\\s17.wav"
+  },
+  {
+    "id": 18,
+    "text": "我们从三点整开始，一直开到五点半结束。",
+    "wav": "E:/temp/voice1/assets/corpus\\s18.wav"
+  },
+  {
+    "id": 19,
+    "text": "人工智能正在深刻改变我们的生活方式和工作方式。",
+    "wav": "E:/temp/voice1/assets/corpus\\s19.wav"
+  },
+  {
+    "id": 20,
+    "text": "他毕业于清华大学计算机科学与技术系。",
+    "wav": "E:/temp/voice1/assets/corpus\\s20.wav"
+  },
+  {
+    "id": 21,
+    "text": "语音识别技术已经广泛应用于手机和智能音箱。",
+    "wav": "E:/temp/voice1/assets/corpus\\s21.wav"
+  },
+  {
+    "id": 22,
+    "text": "李经理明天出差去上海谈合作，晚上八点的高铁。",
+    "wav": "E:/temp/voice1/assets/corpus\\s22.wav"
+  },
+  {
+    "id": 23,
+    "text": "明天是国庆节，我们放假七天，准备去杭州旅游。",
+    "wav": "E:/temp/voice1/assets/corpus\\s23.wav"
+  },
+  {
+    "id": 24,
+    "text": "研究表明，经常运动的人患心血管疾病的风险明显更低。",
+    "wav": "E:/temp/voice1/assets/corpus\\s24.wav"
+  }
+]

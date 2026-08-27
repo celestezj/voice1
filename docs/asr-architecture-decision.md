@@ -1,0 +1,204 @@
+# 实时 ASR 方案选型（2026-08 立项草稿）
+
+> 本文件是项目的**架构决策记录（ADR）**：为什么选 FunASR/paraformer-streaming 为主力、
+> faster-whisper 为可选项、硬件与环境的来龙去脉、验收约定。
+>
+> **状态：立项草稿**。探索阶段（T3-T5）的实测数字将回填本表；最终定案后本文件成为权威依据，
+> 实现细节见 README（引擎设计、环境与复现）。本文从第一天写起——决策记录是"当时的思考"，不是事后的补丁。
+
+## 目标与核心指标（口径写死）
+
+- **目标**：实时音频→文本，流式"边说边出字"，**离线运行**（最终方案不联网），中文准确率高。
+- **硬指标**（可测、有阈值、可判定）：
+  - **RTF（实时率）** = 识别耗时 / 音频时长，一次完整识别计。GPU < **0.3**，CPU < **1**（识别不比说话慢）。
+  - **尾字延迟** = 说话停止时刻 → 该句完整文本回调时刻（VAD 判定停止 + 计时戳）。GPU < **0.5s**。
+  - **CER（字错误率）** = 编辑距离 / 总字数，固定测试集（自建 20-30 句中文已知文本）对照。**< 5%**。
+  - **离线**：权重缓存后运行期零网络请求。
+- **软目标**（排序但不设及格线）：流式首段延迟 <0.6s、标点恢复、数字归一化、热词纠偏。
+- 口径不清会两个人测出两个数——以上定义写死在 `bench/bench_asr.py` 与 README 验收区。
+
+## 硬件与开发环境
+
+- GPU：**RTX 2070 SUPER 8GB**（Turing sm_75），与 voice0 同机；总显存 8.59GB。
+- conda 环境 **`voice-asr`**：从 `voice-tts` **克隆**（含 torch 2.11.0+cu126、已修 jax/setuptools 坑），
+  省去 torch ~2.5GB 重下载；克隆后遇版本不对**在 voice-asr 内单独重装**，不干扰 voice0 的 voice-tts 环境。
+  **（2026-08-27 克隆验证通过：torch 2.11.0+cu126 / CUDA=True / RTX 2070 SUPER / numpy 2.2.6 / transformers 4.57.6）**
+- 本机网络：huggingface.co / raw.githubusercontent.com 直连被墙或极慢；**hf-mirror.com 与 ghfast.top 代理可用**（voice0 已验证，仅首次下载权重用）。
+- 采样率：ASR 链路统一 **16kHz**（麦克风/模型）；voice0 TTS 是 44.1kHz，两条链路互不干扰。
+
+## 候选方案对比（2026 版开源 ASR 横向；**状态：待实测回填**）
+
+| 方案 | 中文准确率 | 原生流式 | CPU 实时 | GPU | 离线 | 依赖 | 许可 | 状态 |
+|---|---|---|---|---|---|---|---|---|
+| **FunASR / paraformer-zh-streaming** | 第一梯队 | ✅ chunk 流式 | ✅ 0.24~0.26 | ~0.87GB | ✅ | 中（pip/modelscope） | 阿里 | **主力 ✅ 已实测** |
+| **faster-whisper**（large-v3/medium） | 高（通用） | ❌ 滑动窗口模拟 | ❌ CPU 2.23 | GPU ✅ 0.20 | ✅ | 低（pip/ctranslate2） | MIT | **可选项（GPU 离线）** |
+| sherpa-onnx（zipformer-zh-14M） | 好 | ✅ 原生 | ✅ 0.037 | 可 | ✅ | 低（pip/onnx） | Apache | **基线 ✅ 已实测** |
+| Vosk | 一般 | ✅ | ✅ | 极小 | ✅ | 低 | Apache | 待测（或作基线） |
+| SenseVoice-small | 好、低延迟 | 一般 | ✅ | 小 | ✅ | 低 | 阿里 | 待测 |
+| ~~云端（讯飞/阿里云/火山/OpenAI）~~ | 高 | ✅ | — | — | ❌ 需联网 | 零 | 闭源 | **排除**（离线剪掉） |
+| ~~NeMo~~ | 高 | ✅ | — | 重 | ✅ | 重 | Apache | **排除**（依赖过重） |
+| ~~纯端到端音频大模型（GPT-4o audio 类）~~ | — | — | — | — | — | — | — | **排除**（尾字延迟 >1s） |
+
+## 选型定案（2026-08-27，T4 实测后）
+
+- **主力**：**FunASR / paraformer-zh-streaming** ✅ 已实测（GPU RTF 0.139 / CPU 0.262 / 显存 870MB）。
+- **可选项**：**faster-whisper medium** ✅ 已实测（GPU RTF 0.204；CPU RTF 2.229 不实时 → 定位 **GPU 离线专用**，自带标点）。
+- **对照基线**：**sherpa-onnx zipformer-zh-14M** ✅ 已实测（CPU RTF 0.037，加载 1.2s）。
+- **排除项**：云端全家桶（离线剪掉）；NeMo（依赖重收益不值）；纯端到端音频大模型（延迟 >1s）；faster-whisper 的 **CPU 实时**场景（RTF 2.229）。
+- **双轨原则**：主路线（实时流式）+ 可选项（高精度）分离；**CPU 实时链路由 FunASR 独担**。
+
+## T4 实测记录（2026-08-27，探针 `tmp/probe_funasr.py`）
+
+**FunASR / paraformer-zh-streaming（`speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online`）**：
+
+| 项 | GPU (2070S) | CPU |
+|---|---|---|
+| 模型下载 | 11 文件 ~41s（modelscope 直连，缓存落 `.cache/modelscope`） | 同 |
+| 加载耗时 | 首次 47s / 二次 6s | 5.8s |
+| 一次性 RTF（3.32s 音频） | **0.183** | **0.241** |
+| 流式 chunk RTF（chunk=50/100ms） | **0.139** | **0.262** |
+| 峰值显存 | **~870MB** | — |
+| 内容级验证 | ✅「今天天气真不错我们一起去公园散散步吧」 | ✅ 同 |
+
+- 硬指标判定：GPU RTF<0.3 ✅、CPU RTF<1 ✅（3.32s 短音频样本；长音频 RTF 随固定开销摊薄待 bench 复核）。
+- ⚠️ 观察到**流式 chunk 会丢重复字**：一次性「散散步」vs 流式「散步」——chunk 边界信息不足所致，CER 语料阶段量化该代价（对应方法论"区分固有代价与可优化点"）。
+
+**faster-whisper（medium，可选项）**：
+
+| 项 | GPU (2070S, float16) | CPU (int8) |
+|---|---|---|
+| 模型下载 | hf-mirror 镜像（缓存落 `.cache/hf`） | 同 |
+| 加载耗时 | 首次 71.7s | 3.4s |
+| RTF | **0.204** ✅ | **2.229** ❌（CPU 无法实时） |
+| 内容级验证 | ✅ 自动带标点：「今天天气真不错**,**我们一起去公园散步吧」 | 同 |
+| 显存 | ctranslate2 独立分配，torch 测不到（后续 nvidia-smi 复核） | — |
+
+- **定位修正**：faster-whisper medium **CPU 不实时**（RTF 2.23）→ 定位为 **GPU 高精度离线转写可选项**；CPU 实时链路完全由 FunASR 承担。**自动标点**是加分项（软目标「标点恢复」）。
+
+**sherpa-onnx（zipformer-zh-14M，对照基线）**：
+
+| 项 | CPU |
+|---|---|
+| 模型下载 | ghfast.top 代理（GitHub releases，缓存落 `.cache/sherpa_models`） |
+| 加载耗时 | **1.2s** |
+| RTF（一次性/100ms块/50ms块） | **0.036 / 0.037 / 0.037** |
+| 内容级验证 | ✅ 与 FunASR 同（同样丢「散」重复字） |
+
+- API 坑（1.13 版）：循环 `recognizer.is_ready(stream)` → `decode_stream`；收尾 `stream.input_finished()`；波形须 `np.ascontiguousarray(float32)`。
+- 定位：**CPU 轻量实时基线**（RTF 极低 + 加载 1.2s），类比 voice0 的 `sapi/` 对照基线。
+
+## 实施顺序（沿 voice0 方法论）
+
+1. **立项（T1-T2）**：骨架 + 本 ADR + CLAUDE.md（本文档）。
+2. **探索（T3-T5）**：克隆环境 → 候选后端最小验证（RTF/显存/权重可达性/流式）→ 建立 CER 验收语料。
+3. **实施（T6-T8）**：core 骨架（ASRBackend 抽象 + RealtimeASR 引擎 + VAD）→ 接主力 paraformer → 接可选项 faster-whisper。
+4. **测试（T9）**：bench_asr.py + 内容级验收（CER<5%）。
+5. **迭代（T10）**：VAD/chunk 参数标定 + 瓶颈量化。
+6. **文档+复现（T11）**：README/CLAUDE.md 完善 + 版本锁定 + preload 脚本 + 从零复现步骤。
+
+## 验收约定（本项目强约定）
+
+- `bench/bench_asr.py` 产出 **CER / RTF / 尾字延迟**，**CPU 与 GPU 各跑一轮**，结果自动回写 README 验收区间。
+- **内容级验收**：CER<5% 达标判定——绝不止看 RTF/延迟（voice0 血泪：数字漂亮≠输出正确）。
+- **探针文化**：一次性诊断脚本隔离「采集 / VAD / 识别」三段，用后即弃但**留存输出**。
+- 运行时零网络请求（仅首次下载权重可联网）；权重经 `preload_asr.py` 预下载到项目内 `.cache/`。
+
+## 实施记录（T6 已完成 · 2026-08-27）
+
+**core 骨架全链路冒烟通过**（sherpa 后端 · CPU）：5 段语料全部正确识别、回调触发 5 次、ttfb 0.016–0.125s（≪0.5s 硬指标）。`tmp/smoke_t6_result.txt` 留存。
+
+- **VAD 断句 bug（已修）**：初版 `EnergyVAD.add()` 用 `ptr` 扫描后 `_buf = _buf[ptr:]`，把**尚未断句的语音帧也裁剪丢弃**——melo 单句无 600ms 连续静音，句子永远留在语音态，flush 时缓冲已空 → 0 句。重写状态机：语音帧保留在 `_buf`（属当前句），`_sentence_start` 记录句首采样，仅修剪句前静音；断句时切出 `[_sentence_start, cut)`（保留 tail 静音保边）。分块 50ms 流式喂入复验正确。
+- **时序基准设计（决策）**：实时流与文件同步是两条时间轴。`recog_axis`：
+  - `"wall"`（实时）：recog 时刻 = monotonic 相对 `_t0`；ttfb 天然含 VAD 尾长 + 识别延迟。
+  - `"audio"`（文件同步，`ingest_file`）：加速喂入，识别时刻映射到音频轴（断句即识别），**ttfb = 纯识别耗时**，与 feed 加速无关。
+  - 文件 t=0 对齐会话起点 `_t0` → `audio_start/end` 恒为文件内相对秒（正数，bench 可比）。
+- 初版 ttfb 为负、后为巨值：均为"两条时间轴未统一"的同一问题（wall 轴减 `_t0` 与 audio 轴直接用 `e_ts`），已用上表根治。
+
+## 实施记录（T7 已完成 · 2026-08-27）
+
+**ParaformerBackend 接入全链路通过**：24 句语料全部出结果，长句正确断句（s22/s23 各断 2 句、每段识别正确）。`tmp/smoke_t7_result.txt` 留存。
+
+- **`is_final=True` 关键坑**：FunASR 对 numpy 数组输入默认 `is_final=False`，末 chunk 被丢弃（实测整句截尾缺"技术系"）。句子级 `recognize` 必须显式传 `is_final=True`。
+- **`recognize_stream` 增量形态**：FunASR 官方 cache 流式——同一个 `cache={}` dict 跨调用复用 + `is_final` 标记，60ms 粒度逐块输出（实测 JOIN 完全正确：'他毕业于'→…→'技术系'）。模型 `inference` 对空 cache 自动 `init_cache`；**不能**传 `{"cache": {}}` 嵌套结构（len≠0 不触发 init → `KeyError: 'prev_samples'`）。
+- **VAD 长句断句正确**：逗号处停顿 >600ms → 断成 2 句，每段识别正确（"晚上八点的高铁"、"准备去杭州旅游"均在第二句）。
+- **裸 CER 0.175 构成（非最终口径）**：① smoke 只显示 `res[0]`（第二句未拼入，属脚本显示问题）；② ref 含标点而 hyp 无标点，CER 按全字符计算被抬高；③ 个别错字（谈→滩、周末→中国、开到→看到）。正式 CER 在 T9 以「去标点 + 整句拼接」口径验收。
+- 模型加载 ~14s（CPU 首次含下载）。
+
+## 实施记录（T8 已完成 · 2026-08-27）
+
+**WhisperBackend 接入全链路通过**（faster-whisper medium · GPU）：24 句全出结果、长句拼接完整（s22/s23 一次过）、8 句严格 CER=0。`tmp/smoke_t8_result.txt` 留存。
+
+- 加载 ~6s（模型已缓存 `.cache/hf/`），GPU 每句 250–770ms（不含句长趋势明显）。
+- **CER(去标点)=0.120 构成（归因）**：
+  - **数字形态**（非听错）：八点→8点、百分之二十→20%、一三八零零零…→1380012345、六点五→6.5%。
+  - **繁体**：中國→中国、我們→我们、電影→电影（faster-whisper 默认输出简体概率高但偶发繁/异体）。
+  - **真实错字**：请把→起码、这道→知道、这款→去款、三点整…→…胎时…、音箱→音响（同音）。
+- **对比数据点**：paraformer 保持中文数字、无繁体 → 中文数字/繁体类指标 paraformer 更优；whisper 在"它→她"等人称/同音错误上更弱于 CER 计数。正式硬指标用**严格 CER**（仅去标点），数字/繁体作为形态差异在 bench 报告中单独归因。
+- **recognize_stream = NotImplementedError**：离线非流式，引擎按 ABC 契约回退"积累块 + 整句 recognize"——"边说边出字"对 whisper 不可用，选型时已知权衡。
+
+## 实施记录（T9 已完成 · 2026-08-27）
+
+**`bench/bench_asr.py` 内容级验收**：严格 CER（仅去标点）为主指标，规范 CER（+繁简统一+中文/阿拉伯数字归一）作形态差异归因；RTF、平均 ttfb、硬指标自动判定；报告落 `reports/bench_{tag}_{backend}_{device}.txt`。全 24 句、CPU/GPU 双测。
+
+| 组合 | 严格CER | 规范CER | RTF | 平均ttfb | 硬指标(cer/rtf/ttfb) |
+|---|---|---|---|---|---|
+| **paraformer/cuda** | **0.047** | 0.047 | **0.150** | **0.400s** | **✓✓✓ 全达标** |
+| paraformer/cpu | 0.047 | 0.047 | 0.257 | 0.688s | ✓✓ ✗（ttfb 超 0.5） |
+| whisper/cuda | 0.120 | 0.058 | 0.139 | 0.370s | ✓✓ ✗（CER 超 5%） |
+| whisper/cpu | 0.132 | — | 2.659 | 7.164s | 全 ✗（CPU 不可用） |
+| sherpa/cpu | 0.190 | 0.190 | 0.033 | 0.084s | ✓✓ ✗（CER 超 5%） |
+
+- **主力定案成立**：paraformer/cuda 三项全达标（24 句 17 句严格 CER=0）。CPU 场景 CER/RTF 达标但 ttfb 0.69s 超标——CPU 推理慢是根本，留 T10 验证 VAD 优化空间。
+- **whisper 严格 CER 的形态归因**：数字（八→8、百分之→%、手机号转阿拉伯）+ 繁体（中國/我們）占大头，规范 CER=0.058 接近门槛；剩余为同音/人称错字。**离线非流式不可"边说边出字"**。
+- **sherpa/cpu RTF 0.033 极优但 CER 0.19 质量不足**（轻量 14M 模型）；s03 空文本、s04 半句——**短句识别缺陷**（记 T11 复现时标注）。
+- **whisper 本地缓存加载修复**：`.cache/hf/` 快照文件完整但 `blobs/` 空 → huggingface_hub 联网校验 revision 失败（`LocalEntryNotFoundError`）。改为**检测本地快照路径直接加载**（`_local_model_dir()`），绕过 hub、满足"缓存后零网络"硬指标。
+- bench 脚本两个坑：① 繁简映射 `str.maketrans` 括号提前闭合（IndentationError）；② `re.sub` 的 repl 函数收到 `re.Match` 而非字符串（`_zh_num` 需 `m.group(0)`）。
+
+## 实施记录（T10 已完成 · 2026-08-27）
+
+**VAD silence_tail_ms 标定（paraformer/cuda，24 句）**：`tmp/calib_vad_result.txt` 留存。
+
+| tail | 严格CER | 断句数 | 平均识别耗时 | 实时尾字延迟估算 | 达标 |
+|---|---|---|---|---|---|
+| 150ms | 0.096 | 52 | 0.196s | 0.346s | ✓（CER 恶化） |
+| **250ms** | **0.059** | 47 | 0.235s | **0.485s** | **✓（默认）** |
+| 400ms | 0.050 | 27 | 0.376s | 0.776s | ✗ |
+| 600ms | 0.047 | 26 | 0.406s | 1.006s | ✗ |
+
+- **无单一 tail 同时达标**：CER 随 tail 单调改善（句尾越干净），实时延迟随 tail 单调恶化。tail=250 为实时最优折中（延迟达标、CER 0.059 逼近 5%）；tail=600 为"精准模式"（CER 0.047 达标、延迟超标，适合离线转录）。
+- **CER 恶化根因 = 句尾语气词幻听**，非断句切错：tail 小 → 断句早 → melo 句尾拖音入句 → paraformer 幻听出尾字（"稍等一下啊"、"六点五六嗯"、"亿亿次"、"很高好"）。tail=600 时句尾干净、CER 最优。
+- **瓶颈量化**：识别耗时与句长线性（RTF≈0.15 GPU 恒定）；尾字延迟 = VAD tail + 整句识别耗时，两者同量级（tail=250 时 0.25 vs 0.226s）。进一步降延迟需**流式增量识别**（边说边出字，paraformer cache 模式已备）——T11 后记。
+- **引擎修复**：`RealtimeASR.__new__` 单例原先只比较 backend/device，改 `vad_silence_tail_ms` 不重建 → 无法标定。已把 tail 纳入重建条件。
+- **bench 扩展**：`--tail` 参数，报告标注 VAD tail。默认 tail 改 250ms。
+
+## 实施记录（T11 已完成 · 2026-08-27）
+
+**文档 + 复现闭环**：
+
+- **README.md**：硬指标 / 从零复现（可整段复制）/ 引擎设计（RealtimeASR 单例·worker·VAD·时序双轴）/ 后端矩阵验收表 / 目录 / 已知限制。全程去绝对路径。
+- **docs/environment-voice1.md**：环境版本锁定（torch 2.11.0+cu126、funasr 1.4.4、faster-whisper 1.2.1、sherpa-onnx 1.13.6 等 11 项）+ 镜像源 + 从零复现。
+- **preload_asr.py**：预下载三后端权重（paraformer→modelscope、whisper→hf-mirror、sherpa→ghfast.top），验证全 OK（缓存下秒级）。
+- **examples/**：`transcribe_file.py`（文件转写，已验证）、`record_mic.py`（sounddevice 麦克风实时，wall 轴 ttfb 含 VAD 尾长）。
+- **CLAUDE.md**：VAD 标定结论、代码结构修正（SentenceResult/sherpa）、API 示例更新。
+
+**从零复现验证**：环境克隆 → preload → bench → examples 全链路命令在 README 可整段复制，已逐一跑通（本机缓存态）。
+
+## 待办清单
+
+### 探索阶段 T3-T5（已完成）
+- [x] T3 克隆 `voice-asr` 环境并验证 torch/CUDA 可用，快照入档（2026-08-27 通过）
+- [x] T4 候选后端最小验证：FunASR / faster-whisper / sherpa-onnx——RTF、峰值显存、权重可达性、流式 → 已回填对比表
+- [x] T5 建立验收语料：24 句中文已知文本 + voice0 melo TTS 合成音频（`assets/corpus/`，UTF-8 manifest，总时长 70.1s）
+
+### 实施阶段 T6-T8
+- [x] T6 搭 core 骨架（ASRBackend 抽象 + RealtimeASR 引擎 + EnergyVAD + SentenceResult），sherpa 后端全链路冒烟通过（2026-08-27）
+- [x] T7 接入主力后端 paraformer-streaming 跑通端到端（24 句全出结果，2026-08-27）
+- [x] T8 接入可选项 faster-whisper 后端（24 句全出结果，CER 归因已记，2026-08-27）
+
+### 测试 / 迭代 / 复现（T9-T11）
+- [x] T9 bench_asr.py + 内容级验收（CER/RTF/延迟，CPU/GPU 双测；paraformer/cuda 全达标，2026-08-27）
+- [x] T10 VAD 参数标定 + 瓶颈量化 + 复验（默认 tail=250，权衡曲线已记，2026-08-27）
+- [x] T11 文档+复现：README/CLAUDE.md 完善 + 版本锁定 + preload 脚本 + examples + 从零复现（2026-08-27）
+
+---
+*本文为 voice1 项目 ADR。立项日期 2026-08-27。*
