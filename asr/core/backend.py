@@ -8,9 +8,12 @@
 import importlib
 from abc import ABC, abstractmethod
 
-# 后端模块与类名约定：asr/<name>/backend.py 的 <Name>Backend
+# 后端模块与类名约定：asr/<name>/backend.py 的 <Name>Backend。
+# 元组第三项（可选）是传给构造器的额外 cfg（如 paraformer-offline 指定 variant）。
 _BACKEND_MODULES = {
     "paraformer": ("asr.paraformer.backend", "ParaformerBackend"),
+    # paraformer-large 离线版（文件整句高精度；非流式，实时流式仍用 paraformer=online）
+    "paraformer-offline": ("asr.paraformer.backend", "ParaformerBackend", {"variant": "offline"}),
     "whisper": ("asr.whisper.backend", "WhisperBackend"),
     "sherpa": ("asr.sherpa.backend", "SherpaBackend"),
 }
@@ -73,7 +76,7 @@ def get_backend(name="paraformer", device="auto", **cfg):
     if n not in _BACKEND_MODULES:
         raise ValueError("未知后端: %r（可选: %s）"
                          % (name, "/".join(sorted(_BACKEND_MODULES))))
-    mod_name, cls_name = _BACKEND_MODULES[n]
+    mod_name, cls_name, *extra = _BACKEND_MODULES[n]
     try:
         mod = importlib.import_module(mod_name)
     except Exception as e:          # 后端模块顶层错误：统一转成带提示的异常
@@ -81,4 +84,4 @@ def get_backend(name="paraformer", device="auto", **cfg):
             "后端 %r 模块加载失败（%s）。请按对应 README 安装依赖后重试。"
             % (name, e)) from e
     cls = getattr(mod, cls_name)
-    return cls(device=device, **cfg)
+    return cls(device=device, **{**(extra[0] if extra else {}), **cfg})

@@ -19,7 +19,8 @@ from asr import RealtimeASR
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("wav", help="音频文件路径（wav/mp3/flac/ogg）")
-    ap.add_argument("--backend", default="paraformer", help="paraformer|whisper|sherpa")
+    ap.add_argument("--backend", default="paraformer",
+                    help="paraformer(默认,流式)|paraformer-offline(离线高精度,整句)|whisper|sherpa")
     ap.add_argument("--device", default="auto", help="auto|cpu|cuda")
     ap.add_argument("--streaming", action="store_true",
                     help="流式逐块出字（on_partial 边说边出 + 句末 flush 定稿）")
