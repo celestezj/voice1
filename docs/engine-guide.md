@@ -1,0 +1,372 @@
+# voice1 引擎使用与工作原理指南
+
+> 面向「想真正用起来 / 想搞懂内部机制」的读者。逐条回答 README 代码案例里最容易
+> 产生的疑问：`on_sentence` 是干嘛的？`SentenceResult` 各字段什么含义？`ingest`
+> 的参数从哪来、阻塞吗？背压什么意思？采集在哪做？一个 chunk 是一次识别任务吗？
+> 单例起了几个线程？wall 轴是什么？VAD 怎么工作的？…… 全部有源码出处。
+
+---
+
+## 1. 全景：一次「说话 → 出字」经过什么
+
+```
+音频来源（两种，引擎不负责采集，只消费喂进来的块）
+   ├── 麦克风：examples/record_mic.py（sounddevice InputStream 16k 回调）
+   │           每回调一批采样 = 一个 audio 块
+   └── 文件：   examples/transcribe_file.py（ingest_file 内部切块）
+
+喂入：asr.ingest(audio, source_ts)
+   │
+   ├─ [T12] 打断词旁路：audio 先喂给轻量 KWS（sherpa 3.3M int8）
+   │       命中"停下" → asr.interrupt()，本块丢弃不识别（毫秒级，主线程内同步执行）
+   │
+   └─ 入队：_audio_q.put((gen, audio, source_ts))     # 有界队列 maxsize=8
+
+常驻 worker 线程（asr-worker，引擎自起的唯一线程）：
+   for 出队一个块:
+       if 块的 gen ≠ 当前 _gen: 丢弃（旧会话）        # interrupt 后旧块作废
+       EnergyVAD.add(块) → 可能断出一个/多个"句"
+       ── 对每个断出的句 ──
+           1) [兜底] KWS detect(句)：命中"停下" → interrupt()，本句丢弃
+           2) 持 _recog_lock 调后端 recognize(句)（模型非线程安全，串行）
+           3) 构造 SentenceResult，若 not stale → 调 on_sentence 回调
+```
+
+要点速记：
+- **引擎不采集音频**，只消费 `ingest()` 喂进来的 16kHz float32 块。采集由调用方做
+  （`record_mic.py` 用 sounddevice，`transcribe_file.py` 用 `read_wav`）。
+- **chunk ≠ 识别任务**。喂多少块由调用方定；VAD 把块**聚合成句**，一句才触发一次
+  `recognize`。
+- **实时回调 = worker 线程调用**，与喂入方（主线程）异步。
+
+---
+
+## 2. 线程模型：创建单例到底起了几个线程？
+
+**引擎自己只起 1 个常驻线程**（源码 `engine.py:91`）：
+
+```python
+self._worker = threading.Thread(target=self._worker_loop, name="asr-worker", daemon=True)
+self._worker.start()
+```
+
+| 线程 | 谁创建 | 干什么 | 何时存在 |
+|---|---|---|---|
+| 主线程 | Python 进程 | 调用 `ingest()` / `ingest_file()` / `close()`；KWS `feed()` 在此线程内**同步**执行 | 常驻 |
+| `asr-worker` | 引擎 `__init__` | 消费队列 → VAD 断句 → `recognize` → 回调 | `close()` 时 join 退出 |
+
+**没有第三个线程。** 关于打断词（停止词）的疑问，明确回答：
+
+- **KWS 流式 `feed()` 跑在调用 `ingest()` 的那个线程里**（实时场景即主线程），不是
+  独立线程。每喂一个块，先同步做一次关键词检测（块小、模型 3.3M int8，每次调用
+  亚毫秒级），命中立即 `interrupt()`——这就是它能"不等 VAD、即时打断"的原因。
+- **KWS 兜底 `detect()` 跑在 worker 线程**里（VAD 断出句子后、识别前调用）。
+- 两者可能并发调同一个 KeywordSpotter 对象（模型非线程安全）→ `SherpaKwsDetector`
+  内部有 `threading.Lock()` 串行。
+- 后端内部（funasr/torch 推理线程池）不算引擎线程，归框架管理。
+
+### 为什么"打断词"需要这个旁路，而不能排队识别？
+
+打断词若也入队，它排在**队尾**——等 worker 处理到它时，前面的句子早已识别完，
+打断毫无意义（这就是"打断悖论"）。旁路 KWS 让"停下"一出口、不等 VAD 断句就命中，
+`interrupt()` 即时把**队里已有的任务全部作废**。详见 `docs/asr-architecture-decision.md` T12。
+
+---
+
+## 3. 音频采集与 chunk
+
+### chunk 从哪来？
+
+引擎不管采集。两种常见来源：
+
+**麦克风实时**（`examples/record_mic.py`）：
+
+```python
+def cb(indata, frames, t, status):
+    asr.ingest(indata[:, 0], source_ts=time.monotonic())   # 每回调一批采样 = 一块
+
+with sd.InputStream(samplerate=16000, channels=1, callback=cb):
+    ...                                        # sounddevice 按 blocksize 分批回调
+```
+
+`sounddevice` 的 `InputStream` 回调每次给一批 `(frames, 1)` 的 float32 采样，`indata[:, 0]`
+取单声道，作为**一个 chunk** 喂入。chunk 大小 = `blocksize`（默认由 sounddevice/声卡定，
+通常 10-50ms 一批；可显式 `blocksize=` 指定）。**chunk 多大完全由调用方决定**——引擎
+只要求是 16kHz float32。
+
+**文件**（`examples/transcribe_file.py`）：`ingest_file()` 内部把 wav 切成 100ms 子块，
+见 §4.5。
+
+### 一个 chunk = 一次识别任务吗？
+
+**不是。** 喂入的块先经 VAD 累积；只有能量模式走到"句末"才断出一个句，断出的句才是
+一次 `recognize` 任务。所以：喂 10 个块，可能断出 0、1、2……个句子（取决于说话节奏）。
+"停顿后继续说话"会断成两句，正是这个机制。
+
+### `ingest` 是阻塞操作吗？背压阻塞是什么？
+
+`ingest` 多数情况下**非阻塞**：把块放入队列就返回。唯一的例外是**背压**：
+
+- 队列 `_audio_q` 有界 `maxsize=8`（源码 `engine.py:81`）。
+- 若识别速度 < 喂入速度，队列被填满 → 下一次 `ingest` 在 `put()` 上**阻塞**，直到
+  worker 腾出空位。
+- 这是**故意的**：防止"无限堆任务 → 延迟无限膨胀"。阻塞喂入方 = 让"边说边喂"的
+  调用方慢下来跟住识别速度，保持实时性。
+
+> 所以 `record_mic.py` 里如果麦克风说话太快、GPU 识别跟不上，sounddevice 回调会
+> 被 `ingest` 阻塞——这是背压在工作，不是死锁。
+
+---
+
+## 4. 核心 API 详解
+
+### 4.1 构造参数（全部给全）
+
+```python
+asr = RealtimeASR(
+    backend="paraformer",        # 后端：paraformer(默认) | whisper | sherpa
+    device="auto",               # auto|cpu|cuda；auto=有CUDA用cuda否则cpu
+    sample_rate=16000,           # 音频采样率（与模型必须一致；引擎会强制16k）
+    vad_silence_tail_ms=250,     # VAD 静音尾长（毫秒）→ 判定"这句话说完了"的静音时长
+    profile=False,               # True 时收集 self._sentences（逐句时序，调试/统计用）
+    debug=False,                 # True 时打印加载/打断/逐句诊断信息
+    interrupt_words=None,        # 非空则启用打断词旁路，如 ["停下"]（T12）
+)
+```
+
+| 参数 | 默认 | 中文含义 | 代码案例 |
+|---|---|---|---|
+| `backend` | `"paraformer"` | 选哪个 ASR 后端（§8 有对比） | `RealtimeASR(backend="whisper")` |
+| `device` | `"auto"` | 推理设备。`auto`=有 CUDA 用 cuda，否则 cpu | `device="cuda"` |
+| `sample_rate` | `16000` | 喂入音频采样率。若后端强制 16k，引擎会把 `self._sr` 同步为 16k | 一般不用动 |
+| `vad_silence_tail_ms` | `250` | VAD 静音尾长（§7）。调大→断句更稳、延迟更大 | `vad_silence_tail_ms=600`（离线高精度） |
+| `profile` | `False` | 收集逐句时序到 `asr._sentences`（含 stale 结果） | `profile=True` |
+| `debug` | `False` | 打印加载/打断/识别诊断 | `debug=True` |
+| `interrupt_words` | `None` | 打断词列表，非空启用 KWS 旁路 | `interrupt_words=["停下"]` |
+
+**单例语义**：同一进程内 `RealtimeASR(...)` 多次调用返回**同一实例**（模型只加载一次）；
+仅当 `backend / device / vad_silence_tail_ms / interrupt_words` 任一**变更**时才销毁重建。
+
+### 4.2 `on_sentence(cb)` —— 结果回调
+
+```python
+asr.on_sentence(lambda r: print(r.text, r.ttfb))
+```
+
+- **作用**：注册"每完成一句话识别"的回调。worker 每断出一句并识别完，就调用一次。
+- **返回**：旧回调（用于换绑）。
+- **何时触发**：实时流里，一句话的音频结束后 `≈ VAD尾长 + 识别耗时` 才回调（这就是
+  ttfb 的来源）。
+- **⚠️ 例外**：`stale=True` 的结果（识别期间被打断）**不进普通回调**（§4.3）。
+
+### 4.3 `SentenceResult` —— 回调收到什么
+
+一句话的识别结果，字段（`jobs.py`，`__slots__`）：
+
+| 字段 | 中文含义 |
+|---|---|
+| `idx` | 句子序号，从 1 起 |
+| `text` | 识别出的文本 |
+| `audio_start` | 该句音频**起点**（相对会话起点的秒数；实时=wall 时刻-`_t0`） |
+| `audio_end` | 该句音频**终点**（VAD 判定"这句话说完了"的时刻） |
+| `recog_start` | 识别线程实际开始推理的时刻 |
+| `recog_end` | 识别线程实际结束推理的时刻 |
+| `ttfb` | **尾字延迟** = `recog_end - audio_end`（说话停止 → 文本回调的时延） |
+| `stale` | `True`=识别期间被 `interrupt()` 打断。**该结果不进普通回调**，仅 `profile` 收集 |
+
+> **「会话起点」「会话」是什么**（`engine.py:89`）：
+> - 引擎创建那一刻打一个 `time.monotonic()` 戳存为 `_t0`，**之后永不改**——所有实时时间戳
+>   （`audio_start/audio_end/recog_start/recog_end`）都是相对它换算的（`- _t0`）。所以
+>   `audio_start=0.5` 意思是"这句话的音频起点距引擎创建过了 0.5 秒"。
+> - **会话 = 创建到 `close()` 之间的一整段连续识别过程**。`interrupt()`（手动或说"停下"）
+>   结束旧会话、开新会话：`_gen += 1`（旧块作废）+ 清 VAD/后端/KWS 状态 + 清队列——
+>   **唯独不改 `_t0`**，保证打断前后时间戳在同一单调时间轴上继续走、不跳变回退。
+> - 文件路径复用同一 `_t0`：`base_ts = self._t0`，块按 `base_ts + i/sr` 打戳，相减后
+>   `audio_start/audio_end` = **文件内相对秒**（正数，bench 可比）。
+
+```python
+def cb(r):
+    print("#%d [%.2fs~%.2fs] %s  尾字延迟=%.3fs  stale=%s"
+          % (r.idx, r.audio_start, r.audio_end, r.text, r.ttfb, r.stale))
+```
+
+### 4.4 `ingest(audio, source_ts=None)` —— 实时喂入
+
+```python
+asr.ingest(audio, source_ts=None)
+```
+
+| 参数 | 类型 | 含义 | 从哪来 |
+|---|---|---|---|
+| `audio` | 1D `np.float32`，16kHz | 一个音频块 | 麦克风回调一批采样 / 文件切块 / 你按任意粒度切 |
+| `source_ts` | float | 该块**第一采样**的 monotonic 时刻（秒）；`None` 时引擎反推 | 采集处打 `time.monotonic()` 戳 |
+
+- **语义**：非阻塞入队（背压满时阻塞，§3）；返回即"已入队"，识别在后台 worker。
+- **`source_ts` 为什么重要**：它决定 `SentenceResult.audio_start/audio_end` 的绝对时间
+  基准。实时场景必须传真实采集时刻，否则时间戳错位。
+- **T12**：`interrupt_words` 非空时，块先过 KWS `feed()`；命中"停下"→ 立即
+  `interrupt()` 并**丢弃本块**（"停下"本身不进识别管线）。
+
+### 4.5 `ingest_file(path, chunk_ms=100)` —— 文件同步识别
+
+```python
+results = asr.ingest_file("会议录音.wav")
+```
+
+- **行为**：读整个 wav → 重采样到 16k → **切成 `chunk_ms`（默认 100ms）子块** →
+  逐块喂 `VAD.add` → 断出句子逐句识别 → 最后 `flush()` 吐出残留缓冲 → 返回全部
+  `SentenceResult`。
+- **一个 wav 不是"一个 chunk/一个任务"**：它被切成多个子块喂 VAD，VAD 再聚合成若干
+  句，**每句 = 一次识别**。长音频 → 多句结果。
+- **同步阻塞**：在调用线程内完成全部识别才返回（与实时流"喂了就走"不同）。
+- 时间轴用 **audio 轴**（§6），结果 `ttfb` = 纯识别耗时（不含喂入加速），bench 可比。
+
+### 4.6 `interrupt()` —— 打断会话
+
+```python
+asr.interrupt()   # 手动打断（换说话人/新会话）；或说"停下"自动触发
+```
+
+- 立即作废**队列里所有排队任务**；正在识别的那句无法中止（整句前向原子），完成后
+  标记 `stale=True` 不进普通回调。
+- 清空 VAD 缓冲、后端流式状态、KWS 流状态。
+- 新喂入的音频正常识别（新会话）。
+
+### 4.7 `close()` —— 关闭
+
+```python
+asr.close()   # 幂等；with RealtimeASR(...) as asr: / __del__ / atexit 都兜底
+```
+
+停 worker 线程 → 关后端模型 → 释放单例槽位。
+
+---
+
+## 5. 完整代码案例（注释版）
+
+### 5.1 麦克风实时识别 + 打断词
+
+```python
+import time
+import sounddevice as sd
+from asr import RealtimeASR
+
+asr = RealtimeASR(backend="paraformer", device="cuda",
+                  interrupt_words=["停下"],   # 说"停下"→ 作废所有排队任务
+                  profile=True)
+asr.on_sentence(lambda r: print("[%.2fs] %s (ttfb=%.3fs)"
+                                % (r.audio_end, r.text, r.ttfb)))
+
+def cb(indata, frames, t, status):
+    asr.ingest(indata[:, 0], source_ts=time.monotonic())   # 每批采样=一个chunk
+
+with sd.InputStream(samplerate=16000, channels=1, callback=cb):
+    time.sleep(30)                 # 说 30 秒
+asr.close()
+```
+
+### 5.2 文件转写
+
+```python
+from asr import RealtimeASR
+
+asr = RealtimeASR(backend="paraformer", device="cuda")
+res = asr.ingest_file("会议录音.wav")        # 同步返回全部句子
+for r in res:
+    print("#%d [%.2f-%.2fs] %s" % (r.idx, r.audio_start, r.audio_end, r.text))
+asr.close()
+```
+
+### 5.3 打断词代码 case（完整可运行）
+
+见 `examples/demonstrate_interrupt.py`——喂多句制造积压、中途说「停下」作废排队任务、
+stale 抑制、打断后恢复，演示脚本有完整注释与参数说明。
+
+---
+
+## 6. 时间轴：wall 轴 vs audio 轴
+
+`SentenceResult` 的 `recog_start / recog_end / ttfb` 有两种基准（引擎参数
+`recog_axis`，内部按场景自动选）：
+
+| 轴 | 用途 | recog 时刻含义 | ttfb 含义 |
+|---|---|---|---|
+| **wall** | 实时流（麦克风） | 实际推理的 **monotonic 墙钟**（相对会话起点 `_t0`） | `recog_end - audio_end` = **说话停止 → 文本回调**的真人感知延迟（含 VAD 尾长 + 识别耗时） |
+| **audio** | 文件同步（`ingest_file`） | 映射到**文件音频时间轴**（`recog_start = a_end`，`recog_end = a_end + 纯推理时长`） | **纯识别耗时**（喂入是加速的，墙钟不再反映音频时间） |
+
+- 为什么叫 **wall**？因为用的是 `time.monotonic()` 墙钟，不是音频累计时长。
+- 实时场景关注 **wall 轴的 ttfb**（硬指标 <0.5s）；bench 文件场景用 **audio 轴**
+  ttfb = 纯识别耗时，方便跨文件/跨设备对比模型本身快慢。
+
+---
+
+## 7. VAD 原理（EnergyVAD 状态机）
+
+源码 `asr/core/audio.py`。纯能量检测（无神经模型），20ms 一帧：
+
+1. **分帧**：每 20ms（16k 下 320 采样）一帧。
+2. **能量判据**：每帧 RMS → dB：
+   ```python
+   db = 20*log10(sqrt(mean(frame^2)) + 1e-12)   # ≥ -35dB 视为"有语音"
+   ```
+3. **状态机**：
+   - 静音态：帧 ≥ `threshold_db`(-35dB) → 进入语音态，记句起点。
+   - 语音态：连续静音帧数 ≥ `silence_tail_frames`（250ms/20ms=12 帧）→ 判定"这句话
+     说完了"，把 [句起点, 当前位置] 剪出作为一句（保留尾部少量静音保边）。
+   - 句长 < `min_speech_ms`(250ms) → 视为噪声，丢弃（这就是过短的"嗯/哦"不会出句）。
+4. **防缓冲膨胀**：只修剪句前静音，已扫描未断句的语音保留。
+
+**参数是延迟-准确率旋钮**（T10 标定，ADR 详述）：
+
+| `vad_silence_tail_ms` | 严格CER | 实时尾字延迟 | 结论 |
+|---|---|---|---|
+| 150ms | 0.096 | ~0.35s | 实时达标但句尾语气词幻听（CER 恶化） |
+| **250ms（默认）** | **0.059** | **~0.48s** | **实时最优折中**（延迟达标、CER 逼近 5%） |
+| 600ms | 0.047 | 超标 | 句尾最干净，离线高精度用 |
+
+> CER 随 tail 单调改善（句尾越干净），实时延迟随 tail 单调恶化，无单一值同时达标。
+> tail 小的 CER 恶化根因是**句尾拖音幻听**（"稍等一下啊""六点五六嗯"），不是断句切错。
+
+---
+
+## 8. 后端矩阵与性能对比
+
+已实现 **3 个后端** + 1 个独立 KWS 打断模型（不是后端）：
+
+| 后端 | 模型 | 定位 | 设备 | 严格CER | RTF | 平均ttfb | 结论 |
+|---|---|---|---|---|---|---|---|
+| **paraformer**（默认） | FunASR paraformer-zh-streaming | 实时主力 | cuda | **0.059** | **0.154** | **0.226s** | **默认**：实时尾字延迟 0.48s 达标 |
+| paraformer | 同上 | 实时主力 | cpu | 0.059 | 0.26 | — | CER/RTF 达标，CPU 尾字延迟略超 |
+| **whisper** | faster-whisper medium | 高精度离线 | cuda | 0.120（规范 0.058） | 0.139 | 0.370s | 自带标点；**CPU 不可实时**（RTF 2.66） |
+| **sherpa** | sherpa-onnx zipformer-zh-14M | CPU 轻量基线 | cpu | 0.190 | **0.033** | 0.084s | RTF 极优、加载 1.2s，质量不足（短句有缺陷） |
+
+**CER 口径**（`bench/bench_asr.py`）：严格 CER = 去标点后编辑距离/总字数（**硬指标
+<5%**）；规范 CER = 再 + 繁简统一 + 中文/阿拉伯数字归一（作形态差异归因）。whisper 的
+严格 CER 被数字/繁体形态拉高，规范 CER 0.058 接近门槛。
+
+**验收结果**（T9/T10，24 句语料）：paraformer/cuda 是唯一**三项硬指标全达标**组合
+（CER 0.059 逼近 5%、RTF 0.154、ttfb 0.226s）。whisper/sherpa 的 CER 均超 5%，定位为
+可选项/基线。完整逐句 hyp 对照：`reports/bench_T9_*.txt`、`reports/bench_T10_*.txt`。
+
+**离线**：三个后端模型首次联网下载后缓存项目内 `.cache/`，运行期零网络。
+
+---
+
+## 9. 常见疑问 FAQ
+
+**Q：为什么"停顿后继续说话"被断成两句、出两个回调？**
+A：VAD 把 `≥250ms` 静音当句尾（`vad_silence_tail_ms`）。停顿超过它 → 前一"句"出回调，
+后面的话成为新句。想少断句就调大 tail（离线高精度），想低延迟就调小。
+
+**Q：模型非线程安全是什么？为什么需要 `_recog_lock`？**
+A：同一个 ONNX/torch 模型对象不能同时在多个线程前向（状态/缓存竞争）。引擎把
+worker 的识别调用全部持同一把 `_recog_lock` 串行化。KWS 检测器同理（内部 `_lock`）。
+
+**Q：`interrupt()` 后正在识别的那句呢？**
+A：整句前向无法中止（前向是原子的）。它会跑完，但结果标记 `stale=True`，**不进普通
+回调**——上层看到的只有"排队任务作废"和"之后的新句正常"。stale 结果可通过
+`profile=True` 后的 `asr._sentences` 观测（调试用）。
+
+**Q：为什么打断词命中要 ~0.2-0.4s 尾随音频？**
+A：流式 KWS 需要尾随音频收尾解码（finalize 关键词）。麦克风持续采样天然满足；若音频
+流在"停下"后立即结束，命中会延迟到后续音频到达。

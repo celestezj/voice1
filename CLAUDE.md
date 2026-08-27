@@ -19,12 +19,14 @@
    ```python
    from asr import RealtimeASR
    asr = RealtimeASR(backend="paraformer", device="cuda")  # 常驻识别，音频块喂入
-   asr.on_sentence(lambda r: print(r.text, r.ttfb))        # 逐句结果回调
+   asr.on_sentence(lambda r: print(r.text, r.ttfb))        # 逐句结果回调（r.stale 可判打断残留）
    asr.ingest(audio_chunk)                                 # 非阻塞入队，内部 VAD 断句 + 识别
    asr.ingest_file("x.wav")                                # 文件同步识别，返回 [SentenceResult]
    asr.close()                                             # 常驻单例，必须显式关
+   # 打断词（T12，可选）：interrupt_words=["停下"] → 用户说「停下」即作废全部排队任务
+   asr = RealtimeASR(backend="paraformer", device="cuda", interrupt_words=["停下"])
    ```
-   > 详细 API 见 README「引擎设计」（T11 完善）。
+   > 详细 API 见 README「引擎设计」（T11/T12 完善）；打断词完整设计见 ADR T12、代码 case 见 `examples/demonstrate_interrupt.py`。
 
 ## 环境硬性约束（新 Claude Code 接手必须先知道）
 
@@ -37,7 +39,11 @@
 
 > 探索/实施阶段逐个补齐（voice0 教训前置：AEC 回声、VAD 参数、模型非线程安全、采样率 16k）。
 
-- **模型非线程安全**：所有识别调用必须持 `_recog_lock`（写新后端/新调用路径时别绕过）。
+- **模型非线程安全**：所有识别调用必须持 `_recog_lock`（写新后端/新调用路径时别绕过）。KWS 检测器同理：ingest 旁路 `feed()`（主线程）与 worker 兜底 `detect()`（worker 线程）可能并发，`SherpaKwsDetector` 内部有 `_lock` 串行。
+- **打断词旁路必须在 ingest 流式 `feed()`，不能走 worker 队列**（T12）：打断词若排进普通队列，它在队尾，等 worker 处理时前面任务早完成——打断悖论。`interrupt()` 拆两步：`_gen += 1` 即时（GIL 原子）+ `_state_lock` 内清 VAD/队列。
+- **stale 的 task_gen 必须用「出队块的 gen」**（T12c 实测竞态）：`_process_sentence_locked(..., task_gen=出队gen)`。若用处理时的当前 `_gen`，interrupt 的 `_gen+=1` 恰在 worker 处理该块中途发生时，块内 VAD 已含的打断词音频会以新代际漏入管线（paraformer 把「停下」误识别为"影响下"）。
+- **KWS 建模单元是拼音**：keywords 文件写 `t íng x ià @停下`，汉字→音节串用 pypinyin `to_initials/to_finals_tone(strict=False)` 自建转换（组合声母/带调韵母不拆）；**不能用 `text2token`**（会拆 `sh`→`s h`）。命中需 ~0.2-0.4s 尾随音频收尾解码（麦克风天然满足）。
+- **KWS 对喂入响度敏感（T12d）**：静音文件放大到 peak≥0.15 会漏检「停下」（噪声底抬高）；VAD（门限 -35dB）又会丢过静音句。引擎不归一；demo 归一至 peak 0.10 为双检公共区间。
 - **VAD 是断句旋钮**：静音尾长 `vad_silence_tail_ms` 决定"这句说完"判定，是延迟-准确率权衡。**实测标定（T10）：默认 250ms**——实时尾字延迟达标、CER 0.059 逼近 5%；离线高精度用 600ms（CER 0.047 达标但延迟超标）。tail 小→句尾拖音幻听（"啊/嗯"等尾字）。无单一值同时达标，按场景选。
 - **麦克风 16kHz / 模型 16kHz**：采样率与 voice0 TTS（44.1kHz）不同，两条链路各管各的。
 - **回声/双讲（AEC）**：若与 voice0 组合成语音对话，麦克风会收到喇叭声音，需回声消除。
@@ -47,14 +53,18 @@
 ```
 asr/
 ├── core/      后端无关骨架
-│   ├── engine.py   RealtimeASR（单例/常驻 worker 线程+有界队列/VAD 断句/lifecycle）
-│   ├── jobs.py     SentenceResult（idx/text/audio_start/audio_end/recog_start/recog_end/ttfb）
+│   ├── engine.py   RealtimeASR（单例/常驻 worker 线程+有界队列/VAD 断句/lifecycle/打断词旁路）
+│   ├── jobs.py     SentenceResult（idx/text/audio_start/audio_end/recog_start/recog_end/ttfb/stale）
 │   ├── backend.py  ASRBackend（ABC：load/recognize/recognize_stream/reset/close）+ get_backend(name) 惰性加载
 │   └── audio.py    音频工具（read_wav/resample_to/EnergyVAD 断句状态机）
+├── kws/        打断词旁路（T12）
+│   ├── interrupt.py   InterruptDetector ABC（load/feed/detect/reset/close）+ get_interrupt_detector
+│   └── sherpa.py      SherpaKwsDetector（zipformer 3.3M int8；feed 流式主路径 / detect 兜底）
 ├── paraformer/  ParaformerBackend（默认主力，FunASR 流式，cache 模式可增量）
 ├── whisper/     WhisperBackend（可选高精度，离线非流式，本地缓存路径加载）
 └── sherpa/      SherpaBackend（CPU 轻量基线，sherpa-onnx zipformer）
 bench/           bench_asr.py（CER/RTF/延迟，--tail 可调 VAD 尾长）
+examples/        transcribe_file / record_mic / demonstrate_interrupt（T12 代码 case）
 docs/            asr-architecture-decision.md（ADR，选型/标定/环境决策）
 assets/          验收语料（CER 裁判集）
 reports/         bench 报告（gitignored）
@@ -63,7 +73,8 @@ reports/         bench 报告（gitignored）
 ## 权威文档（动手前先读对应章节）
 
 - `docs/asr-architecture-decision.md` = **选型结论与硬指标**（ADR，从立项第一天写起）。
-- `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计。
+- `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比）。
+- `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。
 
 ## 协作习惯（本项目）

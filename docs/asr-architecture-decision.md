@@ -183,6 +183,56 @@
 
 **从零复现验证**：环境克隆 → preload → bench → examples 全链路命令在 README 可整段复制，已逐一跑通（本机缓存态）。
 
+## 实施记录（T12 已完成 · 2026-08-27）
+
+**打断词旁路（interrupt word bypass）**：用户说固定触发词（默认「停下」）→ 即时作废全部排队识别任务。
+`tmp/test_t12c_result.txt` 留存（A 白盒 stale / B 积压打断 / C 恢复，全 PASS）。
+
+### 需求缘起（打断悖论，用户质疑后澄清）
+
+连续流场景用户连说多句 → 任务排队串行识别。此时说「停止」**不能**走普通识别队列：它是队尾一个
+普通任务，等它被识别时前面的任务早已完成——打断悖论。因此打断指令必须**旁路**主队列，用极轻量
+的独立模型毫秒级识别，命中即作废队列。
+
+### 定案
+
+- **不支持自动抢占**（用户说一长串，中途停顿>250ms 会被当作句末断句，若自动打断则只有最后一句被
+  提交，前几句全丢——破坏连续语速说话）。**只支持旁路主动打断**：用户主动说「停下」。
+- **KWS 旁路**：sherpa-onnx `KeywordSpotter`（zipformer wenetspeech **3.3M int8**，~毫秒级），与主 ASR
+  并行运行。`interrupt_words=["停下"]` 时启用；加载失败仅告警降级为"无打断"，不阻塞主识别。
+- **触发路径（关键）**：KWS 检测必须在 **ingest 流式 `feed()`**（音频块到达即喂，不等 VAD 断句）。
+  若放在 worker 里等 VAD 断句成句再 detect，打断词音频在队尾，等 worker 处理到时前面任务已完成——
+  同样悖论。VAD 断句后整句 `detect()` 仅作兜底（流式 miss 的第二道防线）。
+- **触发块丢弃**：`feed()` 命中的音频块不入队（该"停下"音频不进识别管线），同时 `interrupt()` 作废
+  全部排队任务、清 VAD/后端状态。
+- **in-progress 任务 stale**：正在识别的那句无法中止（整句前向原子），完成后判 `stale=True`，
+  **不进普通回调**（语义上属旧会话；profile 仍收集供诊断）。
+- **task_gen 用出队块代际（T12c 实测发现的竞态修复）**：`_process_sentence_locked` 的 `task_gen`
+  必须传**出队块的 gen** 而非处理时的当前 `_gen`。否则 interrupt() 的 `_gen+=1` 发生在 worker
+  处理该块中途时，该块 VAD 里已含的触发词音频会以"新代际"被识别 → 触发词漏进管线（实测 paraformer
+  把 melo「停下」误识别为"影响下"）。用块 gen 后该句判 stale 被丢弃。
+
+### KWS 实现要点（坑）
+
+- **建模单元是拼音（声母+韵母）非汉字**：keywords 文件 `t íng x ià @停下`。汉字→音节串用 pypinyin
+  的 `to_initials/to_finals_tone(strict=False)` 自建转换（组合声母 `zh/sh/ch` **不拆**、带调韵母
+  `uò` 不拆）。**不能**用 `sherpa_onnx.utils.text2token(ppinyin)`——它把 `sh` 拆成 `s h`、`uò` 拆成
+  `u ò`，与 tokens.txt 建模单元不符（实测对照官方 test_keywords.txt 逐词一致才定案）。
+- **命中需尾随音频收尾解码**：流式 KWS 要 ~0.2-0.4s 尾随音频才能 finalize 关键词（detect 整句用
+  0.66s 尾静音同理）。真实麦克风持续采样天然满足；若音频流在「停下」后立即结束，命中延迟到后续
+  音频到达（`num_trailing_blanks` 调 0 无效，实测）。引擎侧实测触发延迟 ~0.66-1.4s（含背压等待）。
+- **每词 boost 文件格式不支持**（`2.0 @停下` 会被当 token）：用全局 `keywords_score`（默认 1.0 最稳；
+  4.0/8.0 反而漏检，实测反直觉）。
+- **模型非线程安全**：ingest 旁路（主线程 feed）与 worker 兜底（detect）可能并发调用 KWS → 检测器
+  内部 `threading.Lock()` 串行全部 KWS 调用。
+- **打断词音频质量**：melo TTS 短词「停下」sherpa ASR 主链路识别为空（TTS 短词质量），但 KWS 能命中
+  ——不阻塞（打断词本就不走主链路）。
+- **KWS 对喂入音频响度/信噪比敏感（T12d 实测）**：把静音音频（peak~0.04、低 SNR，如 corpus s01
+  「你好。」）放大到 peak≥0.15 时，KWS 会漏检「停下」——放大抬高了噪声底，污染流式解码特征；
+  而 peak≈0.10 是"VAD 能断句 + KWS 能命中"的实测公共区间（VAD 能量门限 -35dB/最短句 250ms 会把
+  过静音的句子当噪声丢弃）。**引擎不自动归一化**（真实麦克风电平通常达标）；demo 脚本
+  `demonstrate_interrupt.py` 归一至 peak 0.10 以兼容任意响度输入，注释说明了区间来源。
+
 ## 待办清单
 
 ### 探索阶段 T3-T5（已完成）
@@ -199,6 +249,9 @@
 - [x] T9 bench_asr.py + 内容级验收（CER/RTF/延迟，CPU/GPU 双测；paraformer/cuda 全达标，2026-08-27）
 - [x] T10 VAD 参数标定 + 瓶颈量化 + 复验（默认 tail=250，权衡曲线已记，2026-08-27）
 - [x] T11 文档+复现：README/CLAUDE.md 完善 + 版本锁定 + preload 脚本 + examples + 从零复现（2026-08-27）
+
+### 打断（T12）
+- [x] T12 打断词旁路：KWS 流式 feed + interrupt 拆步 + stale 标记 + task_gen 竞态修复 + 文档/代码 case（2026-08-27）
 
 ---
 *本文为 voice1 项目 ADR。立项日期 2026-08-27。*
