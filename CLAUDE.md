@@ -51,6 +51,8 @@
   设成不可达地址仍加载成功）。写新后端/改加载路径时别丢"本地优先"。
 - **FunASR 流式 cache 返回 DELTA 非累计（T13）**：`recognize_stream(chunk, is_final=False)` 返回的是本块**新增**片段（"明天早"→"上八点"→"开会"），不是累计文本。后端必须内部累加（`_partial_buf`），`is_final=True` 返回累加结果并清 cache。sherpa `get_result()` 本身累计。写新后端时别把 delta 当累计回调给上层。
 - **流式 flush 持锁边界（T13）**：worker 流式路径在 `_state_lock` 内、持 `_recog_lock` 调 `recognize_stream(is_final=True)` 完成定稿，随后 `_process_sentence_locked(..., preset_text=text)` **跳过整句 recognize**——避免 `_recog_lock` 重入死锁。改这段时别让 flush 与整句识别抢锁。
+- **preset 路径 ttfb 须补 flush 耗时（T15）**：`preset_text` 路径下 t2-t1 只剩微秒（识别已提前在 `_stream_finalize` 完成），audio 轴 ttfb 会虚报 0——`_stream_finalize` 实测 flush 耗时经 `preset_dur` 传回，audio 轴 `ttfb=(t2-t1)+preset_dur`（wall 轴不动）。
+- **流式文件末残句别重喂 `sent`（T15）**：`vad.flush()` 返回的残句音频**早已逐块喂过 partial**（cache 已含整句），收尾时**不能再喂 `sent`**——会 double-feed：文本重复/静音幻听（实测 mp3 复现「内心反映…内心反映…」）。修法：喂 100ms 静音块触发 `is_final=True` 取回累计文本（等价实时流句末边界块）；cache 为空（残句只是纯尾静音）返回 '' → 跳过。
 - **安静文件流式漏断句 + 归一化只放大不缩小（T13）**：VAD 门限 -35dB/最短句 250ms，过静音短句（corpus s01/s04 原始 RMS<-38dB，仅 2~5 帧过阈）被当噪声丢弃 → 流式路径（无文件末 flush 兜底）句子永不闭合、与下一句合并。demo/bench 对语料**只放大** peak<0.10 的文件到 0.10（响亮文件保持原电平）——**别统一压到 0.10**，否则 RMS 在 -34dB 附近的文件（s03/s06/s07）跌破门限同样漏断句，单文件卡 ~19s 拖垮整趟 bench（整句 CER 0.059→0.108）。
 - **bench 延迟趟必须连续喂入（T13）**：paced 趟别"喂一文件等一文件"——等 final 的 wait 期间 VAD 时间线（`_ts_cur`）不推进、与真实墙钟脱节 → `audio_end` 被低估 → ttfb 虚高且逐文件累积（实测 24 文件后虚高到 1.8s）。连续喂入（文件间靠尾静音停顿）+ 末尾统一 `_wait_idle` 排空，ttfb 才真实。
 - **VAD 是断句旋钮**：静音尾长 `vad_silence_tail_ms` 决定"这句说完"判定，是延迟-准确率权衡。**实测标定（T10）：默认 250ms**——实时尾字延迟达标、CER 0.059 逼近 5%；离线高精度用 600ms（CER 0.047 达标但延迟超标）。tail 小→句尾拖音幻听（"啊/嗯"等尾字）。无单一值同时达标，按场景选。

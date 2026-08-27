@@ -195,7 +195,19 @@ class RealtimeASR:
                             break
                         results.append(self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="audio"))
             for sent, s_ts, e_ts in self._vad.flush(base_ts + len(data) / self._sr):
-                results.append(self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="audio"))
+                if self._stream_capable:
+                    # 文件末残句（流式）：残句音频**早已逐块喂过 partial**（cache 已含
+                    # 整句），不能重喂 sent——实测会 double-feed：文本重复/静音幻听。
+                    # 等价实时流句末边界块：喂 100ms 静音触发 is_final=True 收尾取回
+                    # 累计文本；cache 为空（残句只是句后纯尾静音）→ 返回 '' → 跳过。
+                    tail = np.zeros(chunk, dtype=np.float32)
+                    r = self._stream_finalize(sent, tail, self._gen, s_ts, e_ts,
+                                              recog_axis="audio")
+                else:
+                    r = self._process_sentence_locked(sent, s_ts, e_ts, recog_axis="audio")
+                # 文件末残句空文本（纯尾静音、无语音）→ 跳过，不产出空行（T15）
+                if r is not None and r.text:
+                    results.append(r)
         return results
 
     def interrupt(self):
@@ -324,12 +336,16 @@ class RealtimeASR:
         定稿承担，尾字延迟 ≈ flush 耗时，与句长无关）。flush 失败 → 退化为整句兜底。
 
         recog_axis：worker 实时流传 "wall"（默认）；`ingest_file` 文件同步传 "audio"
-        （ttfb = 纯 flush 耗时，与喂入速度无关，bench 可比）。
+        （ttfb = 纯 flush 耗时，与喂入速度无关，bench 可比）。T15：flush 实际耗时
+        随 preset_dur 传给 `_process_sentence_locked`，audio 轴 ttfb = 真 flush 耗时
+        （此前 preset 路径 t2-t1 微秒级，ttfb 虚报 0）。
         """
         try:
             with self._recog_lock:
+                t_flush = SentenceResult.now()
                 text = self._backend.recognize_stream(audio, is_final=True)
                 self._backend.reset()              # 清流式状态（paraformer cache / sherpa stream）
+                preset_dur = SentenceResult.now() - t_flush
         except Exception:
             self._stream_capable = False           # 流式不可用：本会话剩余走整句
             try:
@@ -338,10 +354,10 @@ class RealtimeASR:
                 pass
             return self._process_sentence_locked(sent, s_ts, e_ts, recog_axis=recog_axis, task_gen=gen)
         return self._process_sentence_locked(sent, s_ts, e_ts, recog_axis=recog_axis,
-                                             task_gen=gen, preset_text=text)
+                                             task_gen=gen, preset_text=text, preset_dur=preset_dur)
 
     def _process_sentence_locked(self, audio, s_ts, e_ts, recog_axis="wall", task_gen=None,
-                                 preset_text=None):
+                                 preset_text=None, preset_dur=None):
         """已持 _state_lock。分配 idx → 识别（持 _recog_lock）→ 构造结果 → 回调。
 
         recog_axis：时间轴基准。
@@ -352,6 +368,8 @@ class RealtimeASR:
         preset_text（T13 流式定稿）：非 None 则跳过整句 recognize——调用方已在
         `_stream_finalize` 持 `_recog_lock` 完成 flush 定稿；本函数只分配 idx/时序/回调
         （避免重入锁死，且 recog_end ≈ flush 完成时刻，ttfb 语义不变）。
+        preset_dur（T15）：调用方测得的外部识别耗时（流式 flush）。preset 路径下
+        t2-t1 只剩微秒（识别已提前做完），audio 轴用它补回真实计算量，ttfb 不再虚报 0。
 
         T12 stale：识别完成后若 `task_gen != self._gen`（识别期间被 interrupt() 打断），
         该结果标记 stale=True，**不进普通回调**。实时流（worker）传**出队块的 gen**
@@ -372,7 +390,10 @@ class RealtimeASR:
         stale = (task_gen != self._gen)       # 识别期间被打断？
         a_start, a_end = s_ts - self._t0, e_ts - self._t0
         if recog_axis == "audio":
-            recog_start, recog_end = a_end, a_end + (t2 - t1)
+            # preset_dur：preset 路径的识别在调用方（_stream_finalize）已计时完成，
+            # t2-t1 只剩微秒；补回 flush 耗时，ttfb 才是真计算量（T15 修复）
+            compute = (t2 - t1) + (preset_dur or 0.0)
+            recog_start, recog_end = a_end, a_end + compute
         else:
             recog_start, recog_end = t1 - self._t0, t2 - self._t0
         result = SentenceResult(idx, text, a_start, a_end, recog_start, recog_end, stale=stale)
