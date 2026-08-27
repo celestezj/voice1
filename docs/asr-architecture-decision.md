@@ -291,9 +291,27 @@ whisper 抛 NotImplementedError）但引擎零调用（engine.py 仅 `recognize`
   （实测 24 文件后虚高到 1.8s）。连续喂入（文件间靠各自 400ms 尾静音停顿）模拟真实麦克风会话，
   VAD 时间线无空洞，ttfb 真实。
 
+## 候选评估：whisper 滑动窗口真流式（已评估 · 暂不采用 · 2026-08-27）
+
+**是什么**：whisper 架构不支持增量解码（整句 encoder 自注意力，无跨块状态），"真流式"只能靠
+**滚动窗口 + 整窗反复重听**模拟：维护最近 N 秒音频窗口，每来新块对整窗 transcribe 一遍，用
+whisper 自带 segment 时间戳只取窗口后段**新增**文本（重叠旧文本丢弃）输出为 partial。
+
+**为何暂不采用**（用户问起后评估）：
+
+| 维度 | 结论 |
+|---|---|
+| 首字延迟 | 短音频质量差须攒最小窗口（2~3s）→ 首字 ≥2s，**不达 0.5s 硬指标**（paraformer 流式 0.93s） |
+| CPU 实时 | whisper CPU RTF 本就 2.23，整窗重推理再放大块数倍 → **完全不可行** |
+| 去重/边界 | 重叠窗口靠时间戳裁剪，偏差即漏字/重字——方案 90% 的坑在这 |
+| 价值 | whisper 定位是"可选高精度离线"，非实时主力；实时硬指标已由 paraformer 流式达成 |
+
+**复用时钩子**（若将来要"whisper 精度 + 实时"）：不动 engine.py（T13 的 `recognize_stream` 契约已够），
+只在 `asr/whisper/backend.py` 实现——维护 `self._window` 环形缓冲 + `self._last_ts`，
+`is_final=False` 时整窗 transcribe 取 `seg.end > _last_ts` 的新段拼接返回；`is_final=True` 整窗定稿。
+**触发条件**：仅在 cuda 场景、且用户明确要 whisper 精度实时时再启用。
 
 
-### 探索阶段 T3-T5（已完成）
 - [x] T3 克隆 `voice-asr` 环境并验证 torch/CUDA 可用，快照入档（2026-08-27 通过）
 - [x] T4 候选后端最小验证：FunASR / faster-whisper / sherpa-onnx——RTF、峰值显存、权重可达性、流式 → 已回填对比表
 - [x] T5 建立验收语料：24 句中文已知文本 + voice0 melo TTS 合成音频（`assets/corpus/`，UTF-8 manifest，总时长 70.1s）

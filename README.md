@@ -72,6 +72,32 @@ asr.interrupt()                                      # 手动打断（作废排�
 asr.close()                                          # 幂等；with / __del__ 兜底
 ```
 
+**流式逐帧出字**（T13，`streaming=True`）：边说边出字 + 句末 flush 定稿，首字延迟与句长无关。
+
+```python
+# 1) 创建流式引擎（streaming 变更会销毁重建单例）
+asr = RealtimeASR(backend="paraformer", device="cuda", streaming=True)
+asr.on_partial(lambda p: print("边说边出:", p.text))    # 每块回调累计部分文本（首字 ≈0.9s）
+asr.on_sentence(lambda r: print("句末定稿:", r.text))   # VAD 断句后 flush 完整句（尾字 ≈0.35s）
+#   后端不支持流式（whisper）→ 告警自动降级整句，不中断
+#   完整可运行对比（流式 vs 整句首字/尾字延迟）：
+#   PYTHONIOENCODING=utf-8 python examples/demonstrate_streaming.py 句1.wav 句2.wav ...
+```
+
+**`on_partial` vs `on_sentence`（一句话内两个回调）**：
+
+| | `on_partial`（流式，`streaming=True`） | `on_sentence`（通用） |
+|---|---|---|
+| 次数 | 每句多次（每个非空增量块一次） | 每句一次 |
+| 内容 | 累计**部分**文本（边说边出字） | **完整句**文本（定稿） |
+| 时机 | 说话期间逐块，首字延迟 ≈0.9s | 句末 VAD 断句 + flush/识别完成后 |
+| 可靠性 | 会随上下文修正，只供展示 | 权威最终结果（stale 除外） |
+| 回调参数 | `PartialResult`（text/audio_start/wall_ts） | `SentenceResult`（…/ttfb/stale） |
+
+- 一句话内先有多次 `on_partial`（实时滚屏），句末以一次 `on_sentence` 收尾（落库）——**最终文本以 `on_sentence` 为准**。
+- `on_sentence` 永远触发（整句/流式/降级都会）；`on_partial` 仅流式且后端支持时触发。
+- 打断（`interrupt()`/「停下」）：`on_sentence` 判 `stale=True` 不触发；`on_partial` 被 `_gen` 守卫作废，回调里 `audio_start` 会跳变——**上层别缓存 partial 累计文本跨句用**。
+
 > **chunk ≠ 识别任务**：喂入的块先由 VAD 累积，能量走到"句末"才断成一句，**一句**才触发
 > 一次识别/一次回调。停顿超过 `vad_silence_tail_ms` 即断句。
 >
