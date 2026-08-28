@@ -72,12 +72,14 @@
 `examples/voice_dialogue.py` 主程序。**只读引用 voice0**（TTS 组件在 voice0 仓库，
 不在这里改；本程序把 voice0 路径塞进 `sys.path` 导入 `from tts import RealtimeTTS`）。
 
-- **跑法**（中文输出必须 `PYTHONIOENCODING=utf-8`）：
-  `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda`
-- **参数含义白话版**（vad-tail / post-commit-window / echo-guard / merge-window 的直觉 +
-  时间线 + 校准）：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些
-  参数很难懂，解释时先讲直觉（"你停多久算说完""AI 答完但音频没播的空档""回声防护"），
-  别只念数值。
+- **跑法（推荐）**（中文输出必须 `PYTHONIOENCODING=utf-8`）：
+  `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300`
+  （`--vad-tail 300` 比默认 600 每轮首包快 300ms；残句由 post-commit barge 兜底，停顿多
+  就调回 600）
+- **参数含义白话版 + 快速开始 + 架构时序图**（vad-tail / post-commit-window / echo-guard /
+  merge-window 的直觉 + 时间线 + 校准 + mermaid 线程时序）：见
+  [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些参数很难懂，解释时先讲
+  直觉（"你停多久算说完""AI 答完但音频没播的空档""回声防护"），别只念数值。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > 配置文件 > 环境变量 `DEEPSEEK_API_KEY`。
 - **打断（barge-in）**：LLM 在途时来新 ASR 句 → `gen` 代际 +1 弃流（生成器 close 关连接），
@@ -155,7 +157,7 @@ reports/         bench 报告（gitignored）
 
 - `docs/asr-architecture-decision.md` = **选型结论与硬指标**（ADR，从立项第一天写起）。
 - `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比/**§9 热词纠错（同音字）**）。
-- `docs/voice-dialogue.md` = **语音对话参数白话解释**（vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表）。
+- `docs/voice-dialogue.md` = **语音对话使用 + 架构**（快速开始含推荐 `--vad-tail 300`；参数白话解释 vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表；mermaid 线程时序图 + 阻塞/非阻塞说明）。
 - `docs/backend-guide.md` = **新增后端接入指南**（流式/非流式后端契约、三步接入清单、引擎消费语义、验收纪律，接 SenseVoice 等新模型时先读）。
 - `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。

@@ -25,7 +25,9 @@ python examples/record_mic.py --device cuda                  # 麦克风实时�
 
 - 完整环境版本与镜像源：见 [`docs/environment-voice1.md`](docs/environment-voice1.md)。
 - 全部设计决策与坑：见 [`docs/asr-architecture-decision.md`](docs/asr-architecture-decision.md)。
-- 语音对话子程序（ASR + DeepSeek LLM + voice0 TTS）参数白话解释：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。
+- **语音对话快速开始**（ASR + DeepSeek LLM + voice0 TTS 全链路，GPU）：
+  `PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300`
+- 语音对话：快速开始 + 参数白话解释 + 架构时序图：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。
 
 ## 引擎设计（RealtimeASR）
 

@@ -1,10 +1,108 @@
-# 语音对话程序参数白话解释（voice_dialogue.py）
+# 语音对话程序（voice_dialogue.py）—— 快速开始 + 参数 + 架构
 
-麦克风 → voice1 ASR → DeepSeek LLM → voice0 TTS 的实时语音对话。本文只讲**参数含义**，
-不讲代码结构。所有参数都可用 `python examples/voice_dialogue.py --help` 查看。
+麦克风 → voice1 ASR → DeepSeek LLM → voice0 TTS 的实时语音对话（单进程非阻塞编排）。
+本文讲三件事：**怎么跑**、**每个参数是什么意思**、**背后怎么工作**（线程/时序）。
+所有参数都可用 `python examples/voice_dialogue.py --help` 查看。
 
-**核心心法一句话**：这些参数不是三个叠加的延迟。只有 `--vad-tail` 是"你停多久算说完"
-（这是判断你说完了的固有成本），其余几个是在"本来就存在的时间里"捡机会，不额外加时。
+## 快速开始
+
+**前提**：
+- conda 环境 `voice-asr`（与 voice0 共享，Python 3.10 + torch + melo）。
+- DeepSeek API key 写进 `dialogue/config.local.json`（已 gitignore，**绝不提交**），
+  或设环境变量 `DEEPSEEK_API_KEY`。
+- 中文输出必须加 `PYTHONIOENCODING=utf-8`（Windows GBK 终端会乱码/报错）。
+
+**推荐启动**（GPU 机器）：
+
+```bash
+conda activate voice-asr
+PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300
+```
+
+- `--asr-device cuda`：ASR（paraformer）跑 GPU；无 GPU 换 `cpu`（实时性差些）。
+- `--tts-device cuda`：TTS（melo）跑 GPU。
+- `--vad-tail 300`：把静音判定从默认 600ms 降到 300ms，**每轮首包音频快 300ms**。
+  代价是组织语言停顿 >300ms 时句子会被提前判定"说完"（残句）——残句由 post-commit
+  barge 零延迟兜底：续句定稿在窗口内 → 撤答复合并重答；窗口外 → 变独立一轮（尾巴不丢）。
+  你说话停顿多、很在意"不拆句"就调回 `--vad-tail 600`（默认）。
+- 打断词默认「停下」，回声门控默认开（半双工）。更多参数见下文「参数详解」。
+
+## 架构：线程模型与时序
+
+单进程、**全链路非阻塞**：主线程只负责采麦克风，识别 / LLM / TTS 各在独立线程干活。
+主要线程：
+
+| 线程 | 所在 | 职责 | 阻塞点 |
+|---|---|---|---|
+| 主线程（PortAudio 回调） | `voice_dialogue.py` | 采块 → AGC → 回声门控判断 → `asr.ingest` | `ingest` 队列满（maxsize=8）时背压 |
+| ASR worker | voice1 `RealtimeASR` | 能量 VAD 断句 + paraformer 识别 → 回调 | 识别计算 |
+| LLM 线程 | controller `_llm_loop` | 阻塞读 SSE → 按句切分 → `tts.submit` | `stream_chat`（网络读） |
+| TTS worker | voice0 `RealtimeTTS` | queue 模式**串行**合成 + 播放 | 合成 / 播放 |
+| `_tts_watch` 守护 | controller | 等最后 Job 播完 → `tts_busy` 回落（回声门控依据） | `job.wait()` |
+| `_compress` 后台 | controller | 上下文超预算时一次性压缩旧历史 | LLM compress 调用 |
+
+**时序图**（一条用户句子从麦克风到喇叭的完整旅程）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant MIC as 主线程<br/>PortAudio回调<br/>每~20ms一块
+    participant ASR as ASR worker<br/>voice1
+    participant CTL as DialogueController
+    participant LLM as LLM线程<br/>dialogue-llm
+    participant TTS as TTS worker<br/>voice0 queue
+
+    Note over MIC,TTS: 全链路非阻塞：主线程只采麦克风，各段在各自线程干活
+
+    rect rgb(238,244,255)
+    Note over MIC,ASR: ① 采集→断句→识别（voice1）
+    loop 持续（说话/静音都喂）
+        MIC->>ASR: asr.ingest(mono)<br/>非阻塞入队（满则背压阻塞）
+        ASR->>ASR: 能量VAD：静音尾≥vad-tail<br/>→判定"这句说完了"
+        ASR->>ASR: paraformer识别<br/>（流式cache + 句末flush定稿）
+    end
+    ASR-->>MIC: on_partial → "…出字"（未定稿，不进LLM）
+    ASR-->>CTL: on_sentence(定稿句)<br/>（ASR worker线程回调）
+    end
+
+    rect rgb(255,248,230)
+    Note over CTL,LLM: ② 提交LLM（controller快操作，不阻塞识别）
+    CTL->>CTL: feed_asr_sentence()：累加本轮<br/>gen+=1 · 在途/post-commit检查
+    CTL->>LLM: 启动 _llm_loop 线程（非阻塞）
+    CTL-->>MIC: on_user → 控制台时间戳定稿行
+    end
+
+    rect rgb(235,250,235)
+    Note over LLM,TTS: ③ LLM流式输出→按句切分→TTS串行合成播放
+    LLM->>LLM: stream_chat() 阻塞读SSE<br/>（专用线程，不卡主线程）
+    loop 每个token增量
+        LLM-->>CTL: on_ai_delta → 控制台"AI: …"流式原地刷新
+        CTL->>CTL: _emit_sentences()：按 。！？ 切句<br/>（逗号不切；40字硬切兜底）
+        CTL->>TTS: tts.submit(句)（非阻塞入队）
+        TTS->>TTS: melo合成(~0.4s) + 播放（queue串行）
+    end
+    LLM->>CTL: 流结束：flush残句 + 记录usage<br/>commit(user→assistant)进历史
+    end
+
+    rect rgb(252,240,246)
+    Note over MIC,CTL: ④ 打断与回声门控（半双工）
+    Note over CTL: 新定稿句 → 三种情况：
+    Note over CTL: ·LLM在途 → gen+1弃流 + tts.interrupt() → 累计重发
+    Note over CTL: ·已答完、音频未开播（post-commit窗口内）→ 撤答复合并重发
+    Note over CTL: ·过窗口（音频已开播）→ 新轮，不打断语音
+    Note over MIC: 回声门控：mic回调读 ctrl.tts_busy<br/>播放期只喂 ingest_kws_only（听"停下"）<br/>滚动grace：开播后 echo-guard 内<br/>有语音能量 → 仍喂正常识别（抓续句尾巴）
+    end
+```
+
+**阻塞 vs 非阻塞**：
+- **非阻塞**：`asr.ingest` 入队、启动 LLM 线程、`tts.submit` 入队、`feed_asr_sentence`
+  （加锁 + 累加 + 起线程的快操作）。
+- **阻塞**：`ingest` 队列满时背压（识别慢则主线程等）；`stream_chat` 读 SSE（LLM 线程
+  专用）；TTS 合成/播放；`_tts_watch` 的 `job.wait()`。
+- 主线程**永不碰网络/长任务**——所以你说完话，识别、LLM、TTS 在后台并行推进。
+
+**核心心法一句话**（参数）：这些参数不是三个叠加的延迟。只有 `--vad-tail` 是"你停多久
+算说完"（判断你说完了的固有成本），其余几个是在"本来就存在的时间里"捡机会，不额外加时。
 
 ---
 
@@ -14,7 +112,7 @@
 
 ```
 t+0       你说完"我每天晚上"
-t+600ms   ── --vad-tail 600 ──> 连续 600ms 静音 → 判定"说完" → 立即发给 LLM
+t+600ms   ── --vad-tail（默认600；快速开始推荐300→提前300ms）──> 连续静音 → 判定"说完" → 立即发给 LLM
 t+600~1600   LLM 生成回复文字（~1s，与参数无关）
 t+1600    回复文字提交给 TTS 合成 ─┐
 t+1600~3100  合成中，喇叭没声      │ ← --post-commit-window 1.5s 就框在这段
@@ -30,15 +128,18 @@ t+4300+    只听"停下"（回声到了，防止 AI 回答自己的回声）
 
 ## 四个参数逐个讲
 
-### `--vad-tail 600` —— 你停多久算"说完"（唯一直接影响回复快慢的）
+### `--vad-tail`（默认 600，快速开始推荐 300）—— 你停多久算"说完"
 
-**直觉**：你停止说话后，要连续 600ms 静音，系统才判定"这句说完了"，才发给 LLM。
+**直觉**：你停止说话后，要连续 N ms 静音，系统才判定"这句说完了"，才发给 LLM。
 
-- 你停顿 < 600ms 接着说 → 不拆句，话并在一起
-- 你停顿 ≥ 600ms → 判定说完，立即发
+- 你停顿 < N ms 接着说 → 不拆句，话并在一起
+- 你停顿 ≥ N ms → 判定说完，立即发
 - 你停顿 1s+ 组织语言 → 被误判成"说完"→ 提前发 → 这就是"一句话没说完就被答"的来源
 
-**调大**（如 1000）：更稳不拆句，但每轮回复慢一点。**调小**（如 300）：更灵敏，但更容易
+**推荐 300**：每轮首包音频快 300ms；停顿 >300ms 提前发的残句由 post-commit barge
+零延迟兜底（续句窗口内合并重答 / 窗口外变独立一轮，尾巴不丢）。
+
+**调大**（如 1000）：更稳不拆句，但每轮回复慢一点。**调小**（如 200）：更灵敏，但更容易
 在你句中停顿处误判拆句。它管不了 1s+ 的组织语言停顿——那是下面两个参数的工作。
 
 ---
