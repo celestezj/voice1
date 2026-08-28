@@ -23,8 +23,9 @@
 默认 1200ms）：回声还没到（首句仍在合成）的窗口内，只要块有语音能量就顺延"仍喂正常
 识别"到 现在+静音尾，让"AI 开答瞬间用户还没说完的尾巴"走完 VAD 静音尾定稿（否则被切去
 KWS-only、句子悬成 partial 被吞）；回声一到由 `--echo-guard` 硬上限兜住不自答。
-`--no-echo-gate` 可关（耳机近场）。LLM 首句 hold-off（`--reply-hold` 默认 0.35s）
-缩小"AI 已开播用户还在说"的窗口。
+`--no-echo-gate` 可关（耳机近场）。首句 hold-off（`--reply-hold`）默认已关（0）：
+post-commit barge 已接管续句打断，hold 只保护首句边界后 0.35s 内续句的极窄窗口，代价是
+每轮首包音频固定 +0.35s——不划算，故默认 0。
 
 拆句根治（零固定延迟）：残句定稿立即发 LLM（无合并延迟）；AI 已答完、但音频还没开播
 （`--post-commit-window` 默认 1500ms，≈melo 首句合成延迟）时用户补句 → 控制器撤下刚
@@ -154,8 +155,10 @@ def main():
     ap.add_argument("--api-key", default=None, help="LLM API key（默认 config.local.json 或 DEEPSEEK_API_KEY）")
     ap.add_argument("--interrupt-words", default="停下",
                     help="打断词（逗号分隔，默认\"停下\"）：命中即终止 LLM+TTS 输出")
-    ap.add_argument("--reply-hold", type=float, default=0.35,
-                    help="LLM 首句 hold-off 秒：给用户续句打断机会（0 关闭，默认 0.35）")
+    ap.add_argument("--reply-hold", type=float, default=0.0,
+                    help="首句 hold-off 秒（默认 0=关）：只在首句边界后 N 秒内续句才省得下这次"
+                         "播报，窗口极窄且每轮固定 +N 秒，续句打断已由 --post-commit-window"
+                         " 零延迟兜底，别开")
     ap.add_argument("--vad-tail", type=int, default=600,
                     help="你停多久算「说完」ms（默认 600）：停 600ms 静音就判定这句话说完、"
                          "发给 LLM。越小越灵敏但容易在你句中停顿处误判拆句；组织语言的停顿"

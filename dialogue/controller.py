@@ -30,7 +30,7 @@ class DialogueController:
     _COMMA_WINDOW = 12            # 硬切时回找逗号的最大回看长度
 
     def __init__(self, llm, tts, *, system_prompt=None, max_history_messages=None,
-                 reply_hold=0.35, merge_window=0.0, post_commit_window=0.0,
+                 reply_hold=0.0, merge_window=0.0, post_commit_window=0.0,
                  max_context_tokens=40000, recent_keep=6, headroom=4000):
         self._llm = llm
         self._tts = tts
