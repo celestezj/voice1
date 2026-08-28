@@ -87,7 +87,7 @@ reports/         bench 报告（gitignored）
 ## 权威文档（动手前先读对应章节）
 
 - `docs/asr-architecture-decision.md` = **选型结论与硬指标**（ADR，从立项第一天写起）。
-- `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比）。
+- `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比/**§9 热词纠错（同音字）**）。
 - `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。
 
