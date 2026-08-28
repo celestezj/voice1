@@ -47,11 +47,12 @@ class ParaformerBackend(ASRBackend):
     sr = 16000
     supports_streaming = True          # 类默认；offline 变体在 __init__ 覆写为 False
 
-    def __init__(self, device="auto", model_id=None, variant="online"):
+    def __init__(self, device="auto", model_id=None, variant="online", debug=False):
         if variant not in _VARIANTS:
             raise ValueError("未知 paraformer 变体: %r（可选: %s）"
                              % (variant, "/".join(sorted(_VARIANTS))))
         self._device = device
+        self._debug = debug            # 引擎透传：True 时放开 FunASR tqdm 进度条（rtf_avg）
         self._variant = variant
         self._hub_id = model_id or _VARIANTS[variant]["hub"]
         self.supports_streaming = _VARIANTS[variant]["streaming"]   # 实例级：offline=False
@@ -99,15 +100,18 @@ class ParaformerBackend(ASRBackend):
                 device = "cpu"
         # 本地缓存优先（离线零网络，满足硬指标"权重缓存后零网络请求"）；缺失才走 hub
         model = self._local_model_dir() or self._hub_id
-        self._model = AutoModel(model=model, device=device, disable_update=True)
+        # disable_pbar：默认关掉 funasr 的 tqdm 进度条（rtf_avg: ... 逐块刷屏）；debug=True 才显示
+        self._model = AutoModel(model=model, device=device, disable_update=True,
+                                disable_pbar=not self._debug)
 
     def recognize(self, audio):
         """整段（句子级）识别。online：is_final=True 末 chunk 不截断；offline：原生 generate。"""
         a = np.ascontiguousarray(audio, dtype=np.float32)
         if self._variant == "offline":
-            res = self._model.generate(input=a)          # 离线整句：无 chunk CFG
+            res = self._model.generate(input=a, disable_pbar=not self._debug)   # 离线整句：无 chunk CFG
         else:
-            res = self._model.generate(input=a, is_final=True, **_CFG)
+            res = self._model.generate(input=a, is_final=True,
+                                       disable_pbar=not self._debug, **_CFG)
         return (res[0]["text"] if isinstance(res, list)
                 else res.get("text", str(res))).strip()
 
@@ -123,7 +127,8 @@ class ParaformerBackend(ASRBackend):
         if self._cache is None:
             self._cache = {}
         a = np.ascontiguousarray(chunk, dtype=np.float32)
-        res = self._model.generate(input=a, cache=self._cache, is_final=is_final, **_CFG)
+        res = self._model.generate(input=a, cache=self._cache, is_final=is_final,
+                                   disable_pbar=not self._debug, **_CFG)
         delta = (res[0]["text"] if isinstance(res, list)
                  else res.get("text", str(res))).strip()
         self._partial_buf += delta

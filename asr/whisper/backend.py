@@ -36,7 +36,7 @@ class WhisperBackend(ASRBackend):
     sr = 16000
     supports_streaming = False     # 离线非流式：recognize_stream 抛 NotImplementedError
 
-    def __init__(self, device="auto", model_id=None, language="zh", beam_size=5):
+    def __init__(self, device="auto", model_id=None, language="zh", beam_size=5, debug=False):
         mid = model_id or "medium"
         if mid not in _MODELS:
             raise ValueError("未知 whisper 模型: %r（可选: %s）"

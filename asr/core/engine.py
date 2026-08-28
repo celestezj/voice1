@@ -69,8 +69,9 @@ class RealtimeASR:
         self._streaming = bool(streaming)
         self._hotword_file = hotword_file
 
-        # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）
-        self._backend = get_backend(self._backend_name, device=device)
+        # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）。
+        # debug 透传：后端（如 paraformer）用它控制是否放开框架的 tqdm 进度条等额外输出。
+        self._backend = get_backend(self._backend_name, device=device, debug=self._debug)
         if self._debug:
             print("[RealtimeASR] 加载后端 %s 模型…" % self._backend_name, flush=True)
         self._backend.load()

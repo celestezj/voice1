@@ -55,6 +55,10 @@
 - **流式**（如 paraformer/sherpa）：实现 `recognize_stream` + `reset`；`is_final=True` 收尾
   返回该句**最终完整文本**，之后流状态失效——**引擎随即会调 `reset()`**。
 
+> **构造器约定**：引擎构造后端时传 `device` + 注册表 cfg + **`debug`**（`debug=True` 表示
+> 打印调试输出）。构造器应收下 `debug=False`（未用可忽略）——paraformer 用它在 `debug=True`
+> 时才放开 FunASR 的 tqdm 进度条（`disable_pbar`），whisper/sherpa 收到即忽略。
+
 ## 3. 三步接入清单
 
 ### 第 1 步：写 `asr/<name>/backend.py`
@@ -80,8 +84,9 @@ class MyBackend(ASRBackend):
     sr = 16000                  # ASR 链路统一 16kHz
     supports_streaming = False  # 非流式
 
-    def __init__(self, device="auto", **cfg):
+    def __init__(self, device="auto", debug=False, **cfg):
         self._device = device
+        self._debug = debug   # 引擎透传：True 时放开框架额外输出（如 funasr 进度条）
         self._model = None
 
     # -- 本地缓存优先（离线零网络，满足"权重缓存后零网络"）--------------

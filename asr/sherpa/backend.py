@@ -28,7 +28,7 @@ class SherpaBackend(ASRBackend):
     sr = 16000
     supports_streaming = True
 
-    def __init__(self, device="auto", model_url=None):
+    def __init__(self, device="auto", model_url=None, debug=False):
         self._device = device
         self._model_url = model_url or _MODEL_URL
         self._model_dir = None

@@ -28,11 +28,13 @@ def main():
     ap.add_argument("--hotword-file", default=None,
                     help="热词文件路径（每行一个纠错项；引擎级拼音纠错，如 神庙→神妙，"
                          "所有后端统一生效）")
+    ap.add_argument("--debug", action="store_true",
+                    help="打印调试信息（含后端框架输出，如 FunASR 的 rtf_avg 进度条）")
     args = ap.parse_args()
 
     asr = RealtimeASR(backend=args.backend, device=args.device,
                       streaming=args.streaming, profile=True,
-                      hotword_file=args.hotword_file)
+                      hotword_file=args.hotword_file, debug=args.debug)
     if args.streaming:
         last = [""]
         def _partial(p):

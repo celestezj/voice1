@@ -128,6 +128,8 @@ def main():
                     help="麦克风设备：序号或名称子串（默认系统默认输入设备）")
     ap.add_argument("--hotword-file", default=None,
                     help="热词文件路径（每行一个纠错项，拼音级；所有后端统一生效）")
+    ap.add_argument("--debug", action="store_true",
+                    help="打印调试信息（含后端框架输出，如 FunASR 的 rtf_avg 进度条）")
     args = ap.parse_args()
 
     input_idx, dev_sr = pick_input_device(args.input_device)
@@ -148,17 +150,35 @@ def main():
     print("麦克风信号正常（RMS %.1f dBFS）" % (20 * np.log10(rms + 1e-12)), flush=True)
 
     asr = RealtimeASR(backend=args.backend, device=args.device, streaming=args.streaming,
-                      profile=True, hotword_file=args.hotword_file)
+                      profile=True, hotword_file=args.hotword_file, debug=args.debug)
     agc = MicAGC()                      # 麦克风自适应增益（说话电平过低时自动放大）
-    asr.on_sentence(lambda r: print("[%.2fs] %s (ttfb=%.3fs)"
-                                    % (r.audio_end, r.text, r.ttfb)))
+
+    # 控制台输出：
+    # - 流式：partial 原地刷新（\r 不换行），句末定稿也原地覆盖，只有新一句开始才换行；
+    # - 非流式：每句独立一行（靠左）。
+    dirty = [False]        # 当前行有进行中的输出（流式用）
     if args.streaming:
         last = [""]
+        finalized = [False]    # 当前行已是一句定稿（下次输出须先换行）
+        def _emit(text):
+            if finalized[0] or not dirty[0]:
+                sys.stdout.write("\n")      # 新一句开始 / 空行 → 先换行
+                dirty[0] = True
+                finalized[0] = False
+            sys.stdout.write("\r" + text)
+            sys.stdout.flush()
         def _partial(p):
-            if p.text and p.text != last[0]:          # 累计文本未变则跳过（避免刷屏）
+            if p.text and p.text != last[0]:          # 累计文本未变则跳过
                 last[0] = p.text
-                print("[流式出字] %s" % p.text, flush=True)
+                _emit(p.text)                         # 原地刷新当前行
+        def _sentence(r):
+            _emit("[%.2fs] %s (ttfb=%.3fs)" % (r.audio_end, r.text, r.ttfb))
+            finalized[0] = True                       # 句末定稿：下句开始才换行
         asr.on_partial(_partial)
+        asr.on_sentence(_sentence)
+    else:
+        asr.on_sentence(lambda r: print("[%.2fs] %s (ttfb=%.3fs)"
+                                        % (r.audio_end, r.text, r.ttfb)))
     print("说话吧…（Ctrl+C 退出）[麦克风自动增益已启用，说话电平过低会自动放大]", flush=True)
 
     def cb(indata, frames, t, status):
@@ -178,6 +198,8 @@ def main():
         print("可尝试 --input-device <序号> 换一个设备，或检查设备是否被其他程序独占。")
     finally:
         asr.close()
+        if dirty[0]:
+            sys.stdout.write("\n")      # 流式中途退出：先换行脱离当前 partial 行
         print("已退出。", flush=True)
 
 
