@@ -11,7 +11,12 @@
 打断语义（用户已拍板）：
 - 新 ASR 句若 LLM 在途 → 取消当前生成并重发「本轮累计」；`interrupt()` 只在显式打断
   LLM 吐词时联动调用（切掉被作废回复的音频与队列）。
-- LLM 已生成完、TTS 还在播时来新句 → **不打断**语音，让它播完，新回复排到后面。
+- **post-commit barge**（`post_commit_window`，主程序默认 1.5s）：LLM 已生成完、但音频
+  还没开播（本轮首句提交至今 < 窗口）时来新句 → 撤下刚 commit 的 (残句→答复)、残句+新句
+  合并连同历史重发。**零固定延迟**——只在用户真补了句尾巴时才重答。
+- LLM 已生成完且音频已开播（过窗口）时来新句 → 新轮，不打断语音。
+- 句末合并窗口（`merge_window`，默认关）：断句后等窗口内补句才发 LLM（每轮固定延迟，
+  主程序默认 0 不用它，post-commit barge 是其零延迟替代）。
 """
 import threading
 import time
@@ -25,7 +30,8 @@ class DialogueController:
     _COMMA_WINDOW = 12            # 硬切时回找逗号的最大回看长度
 
     def __init__(self, llm, tts, *, system_prompt=None, max_history_messages=None,
-                 reply_hold=0.35, max_context_tokens=40000, recent_keep=6, headroom=4000):
+                 reply_hold=0.35, merge_window=0.0, post_commit_window=0.0,
+                 max_context_tokens=40000, recent_keep=6, headroom=4000):
         self._llm = llm
         self._tts = tts
         self._system = system_prompt or (
@@ -45,6 +51,11 @@ class DialogueController:
         self._assistant_full = ""    # 当前生成完整文本（_emit_sentences 只剥 buf 不动它，commit 用）
         self._gen = 0                # LLM 代际：每新句 +1，旧线程据此弃流
         self._stream_thread = None   # 在途 LLM 读流线程
+        self._merge_window = float(merge_window)   # 句末合并窗口秒（0=关，立即发）
+        self._merge_deadline = None                # 当前合并窗口截止（monotonic）
+        self._merge_waiter = None                  # 合并窗口守护线程
+        self._post_commit_window = float(post_commit_window)  # post-commit barge 窗口秒（0=关）
+        self._turn_first_submit_ts = None          # 本轮首句提交时刻（post-commit 窗口锚点）
         self._tts_job = None         # 最近提交的 TTS Job（voice0 返回值，含 .done/.wait）
         self._tts_busy = False       # TTS 是否在播/待播（echo 门控依据）
         self._lock = threading.RLock()     # RLock：_llm_loop finally 在锁内 _submit_tts 会重入
@@ -53,14 +64,22 @@ class DialogueController:
         self._on_ai_delta = None
         self._on_ai_sentence = None
         self._on_ai_done = None
+        self._on_llm_start = None    # LLM 请求已发起（等待首 token，供控制台状态行）
+        self._on_llm_error = None    # LLM 流抛异常（供控制台报错行）
+        self._on_merge_rollback = None   # post-commit barge 撤答复（供控制台提示）
 
     # ---------------- 回调注册（供主程序/控制台接）----------------
     def register_callbacks(self, on_user=None, on_ai_delta=None,
-                           on_ai_sentence=None, on_ai_done=None):
+                           on_ai_sentence=None, on_ai_done=None,
+                           on_llm_start=None, on_llm_error=None,
+                           on_merge_rollback=None):
         self._on_user = on_user
         self._on_ai_delta = on_ai_delta
         self._on_ai_sentence = on_ai_sentence
         self._on_ai_done = on_ai_done
+        self._on_llm_start = on_llm_start
+        self._on_llm_error = on_llm_error
+        self._on_merge_rollback = on_merge_rollback   # post-commit barge 撤答复（供控制台提示）
 
     @property
     def history(self):
@@ -99,6 +118,7 @@ class DialogueController:
             self._assistant_buf = ""
             self._assistant_full = ""
             self._stream_thread = None
+            self._merge_deadline = None    # 有挂起的合并窗口 → 作废（"停下"不续发）
             self._tts.interrupt()          # 立即切音频 + 清队列（快操作）
         self._maybe_compress()             # 历史变了，检查是否需要压缩
 
@@ -107,6 +127,8 @@ class DialogueController:
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
         job = self._tts.submit(sentence)
         with self._lock:
+            if self._turn_first_submit_ts is None:
+                self._turn_first_submit_ts = time.monotonic()  # 本轮首句提交时刻（post-commit 锚点）
             first = self._tts_job is None
             self._tts_job = job
             self._tts_busy = True
@@ -178,33 +200,110 @@ class DialogueController:
 
     # ---------------- 入口：ASR on_sentence（ASR worker 线程）----------------
     def feed_asr_sentence(self, result):
-        """新定稿句。快操作，不阻塞识别；LLM 在途则打断并重发「本轮累计」。"""
+        """新定稿句。快操作，不阻塞识别。
+
+        三层防拆句：
+        - 在途 barge：LLM 还在流时来新句 → gen+1 弃流 + `tts.interrupt()`，累计重发。
+        - **post-commit barge**（`_post_commit_window`，主程序默认 1.5s）：LLM 已生成完、
+          但音频还没开播（本轮首句提交至今 < 窗口）时来新句 → `_rollback_last_turn_locked`
+          撤下刚 commit 的 (残句→答复)，残句+新句合并连同历史重发。零固定延迟。
+        - 句末合并窗口（`_merge_window`，默认关）：断句后等窗口内补句才发 LLM（固定延迟，
+          不用）。窗口=0 → 立即发。
+        """
         text = (getattr(result, "text", None) or "").strip()
         if not text:
             return
         with self._lock:
             if self._closed:
                 return
+            in_flight = self._stream_thread is not None and self._stream_thread.is_alive()
+            post_commit = (not in_flight and self._post_commit_window > 0
+                           and self._tts_busy
+                           and self._turn_first_submit_ts is not None
+                           and time.monotonic() - self._turn_first_submit_ts < self._post_commit_window)
+            if post_commit:
+                self._rollback_last_turn_locked()   # 撤下 (残句→答复)，残句回到本轮累计
             self._user_turn = (self._user_turn + text) if self._user_turn else text
-            barge = self._stream_thread is not None and self._stream_thread.is_alive()
-            gen = self._gen + 1
-            self._gen = gen
+            self._gen += 1
             self._assistant_buf = ""          # 旧流作废：清缓冲与完整文本
             self._assistant_full = ""
-            messages = self._build_messages_locked()   # system(+摘要)+历史+最新用户问题
-            if barge:
-                self._tts.interrupt()         # 显式打断 LLM 吐词 → 联动切掉作废回复音频
+            if in_flight or post_commit:
+                self._tts.interrupt()         # 在途吐词 / 已答未开播 → 切掉作废音频
+            self._stream_thread = None        # 在途流作废（gen 已变，旧线程自行退出）
+            if self._merge_window > 0:
+                self._merge_deadline = time.monotonic() + self._merge_window
+                launch = False
+            else:
+                self._merge_deadline = None
+                launch = True
+        if post_commit and self._on_merge_rollback:
+            self._on_merge_rollback()
         if self._on_user:
             self._on_user(result)
+        if launch:
+            self._launch_llm()
+        else:
+            self._start_merge_waiter()
+
+    def _rollback_last_turn_locked(self):
+        """撤下最近一轮已 commit 的 (user→assistant) 对，残句放回本轮累计。
+
+        仅用于 post-commit barge：AI 已生成完但音频还没开播，用户补了句尾巴——把对残句
+        的答复从历史撤掉，残句与新句合并后连同历史一起重发。调用方持锁。
+        """
+        if not self._history:
+            return
+        if self._history[-1]["role"] == "assistant":
+            self._history.pop()
+        if self._history and self._history[-1]["role"] == "user":
+            frag = self._history.pop()["content"]
+            self._user_turn = frag
+
+    def _launch_llm(self):
+        """把本轮累计发给 LLM（合并窗口过期 / 窗口=0 立即）。调用方不持锁。"""
+        with self._lock:
+            if self._closed or not self._user_turn:
+                return
+            if self._stream_thread is not None and self._stream_thread.is_alive():
+                return                 # 防御：不应有在途流（feed 已置 None）
+            self._merge_deadline = None
+            self._turn_first_submit_ts = None  # 新一轮：首句提交时刻锚点重置
+            gen = self._gen
+            messages = self._build_messages_locked()   # system(+摘要)+历史+最新用户问题
         t = threading.Thread(target=self._llm_loop, args=(gen, messages),
                              name="dialogue-llm", daemon=True)
         with self._lock:
             self._stream_thread = t
         t.start()
 
+    def _start_merge_waiter(self):
+        with self._lock:
+            if self._merge_waiter is not None and self._merge_waiter.is_alive():
+                return                 # 已有守护线程盯着，新句会重置 deadline
+            self._merge_waiter = threading.Thread(target=self._merge_wait,
+                                                  name="dialogue-merge", daemon=True)
+            self._merge_waiter.start()
+
+    def _merge_wait(self):
+        """守护：等合并窗口过期 → 发 LLM。新句重置 deadline，分片睡及时响应。"""
+        while True:
+            with self._lock:
+                if self._closed:
+                    return
+                deadline = self._merge_deadline
+            if deadline is None:
+                return
+            now = time.monotonic()
+            if now >= deadline:
+                self._launch_llm()
+                return
+            time.sleep(0.1)
+
     # ---------------- LLM 读流线程 ----------------
     def _llm_loop(self, gen, messages):
         try:
+            if self._on_llm_start:
+                self._on_llm_start()
             for delta in self._llm.stream_chat(messages):
                 if gen != self._gen:          # 已被更新请求取代 → 弃流（生成器 close 关连接）
                     return
@@ -226,6 +325,8 @@ class DialogueController:
         except Exception as e:
             if gen == self._gen:
                 print("[dialogue] LLM 出错: %s" % e, flush=True)
+                if self._on_llm_error:
+                    self._on_llm_error(e)
         finally:
             if gen != self._gen:
                 return
@@ -317,3 +418,4 @@ class DialogueController:
         with self._lock:
             self._closed = True
             self._gen += 1                    # 让在途线程弃流（不杀线程）
+            self._merge_deadline = None       # 结束挂起的合并窗口（_merge_wait 见 _closed 退出）

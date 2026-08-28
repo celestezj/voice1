@@ -74,6 +74,10 @@
 
 - **跑法**（中文输出必须 `PYTHONIOENCODING=utf-8`）：
   `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda`
+- **参数含义白话版**（vad-tail / post-commit-window / echo-guard / merge-window 的直觉 +
+  时间线 + 校准）：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些
+  参数很难懂，解释时先讲直觉（"你停多久算说完""AI 答完但音频没播的空档""回声防护"），
+  别只念数值。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > 配置文件 > 环境变量 `DEEPSEEK_API_KEY`。
 - **打断（barge-in）**：LLM 在途时来新 ASR 句 → `gen` 代际 +1 弃流（生成器 close 关连接），
@@ -84,8 +88,24 @@
 - **回声半双工门控（v1）**：TTS 播放期（`ctrl.tts_busy`）mic 只喂 `asr.ingest_kws_only()`
   （只听"停下"，回声不进识别 → 无反馈自答）；`--no-echo-gate` 关（耳机近场可用）。
   忙碌跟踪靠 voice0 `Job.done` + 守护 watcher 线程（voice0 无播放回调且不可改）。
+  **门控开启有滚动 grace**（`--echo-guard` 默认 1200ms）：回声还没到（首句仍在合成）的
+  窗口内，mic 块有语音能量（> -38dB）就顺延"仍喂正常识别"到 现在+静音尾+0.2s，让"AI 开答
+  瞬间用户还没说完的尾巴"走完 VAD 静音尾定稿（否则被切去 KWS-only、悬成 partial 被吞）；
+  回声一到由 `--echo-guard` 硬上限兜住不自答。voice0 无播放回调，音频"是否已开播"无精确
+  信号，post-commit 窗口以首句提交时刻作代理。
 - **首句 hold-off**：`--reply-hold`（默认 0.35s）——每轮回复首句先锁外延迟，给用户续句
   打断窗口；hold 内 barge → 弃句绝不播。代价是每轮首包音频 +0.35s。
+- **VAD 静音尾长 `--vad-tail`**（默认 600ms）：判句末的停顿阈值，只管"识别何时收句"。
+  别指望调大它根治句中停顿拆句——组织语言的停顿实测常超 1s（`--vad-tail 1000` 仍切），
+  任何固定尾长都拆不干净；拆句/残句被吞由 **post-commit barge** 兜底（见下，零延迟）。
+- **post-commit barge（拆句根治，零固定延迟）** `--post-commit-window`（默认 1500ms）：
+  残句定稿**立即发 LLM**；AI 已答完但音频还没开播（本轮首句提交至今 < 窗口，≈melo 首句
+  合成延迟）时用户补句 → `_rollback_last_turn_locked()` 撤下刚 commit 的 (残句→答复)、
+  残句+新句连同历史重发。只在真补了句尾巴才重答，无每轮延迟。音频已开播后的续句 = 新轮。
+  窗口锚点是 `_turn_first_submit_ts`（本轮首句提交时刻），`_launch_llm` 重置。
+- **句末合并窗口 `--merge-window`**（默认 0=关）：断句后等窗口内补句才发 LLM（每轮固定
+  延迟，用户已否决，留作可选）。`_merge_wait` 守护线程（0.1s 分片睡、新句重置 deadline）
+  + `_launch_llm` 统一入口；`hard_stop`/`close` 作废挂起窗口。
 - **历史压缩**：`--max-context-tokens`（默认 40000）。DeepSeek `include_usage` 精确
   `prompt_tokens` 计量；超阈值（预留 `headroom` 4000）且 LLM 空闲 → **一次性后台线程**
   调 LLM 压缩旧历史为摘要，最近 `recent_keep`（6）条原样保留，摘要拼进 system
@@ -94,6 +114,12 @@
 - **线程纪律**：`feed_asr_sentence` 在 ASR worker 线程只做快操作（累加/gen/起 LLM 线程），
   绝不阻塞识别；锁序固定 `controller._lock(RLock) → tts._submit_lock`（RLock 因 finally
   在锁内 `_submit_tts` 会重入）。TTS 默认 `mode="queue"` 非打断。
+- **控制台诊断标记**（区分「没提交 / LLM 卡住 / LLM 出错」）：`_Console` 三态行——
+  `… `前缀=ASR 流式出字**未定稿**（不会提交）；`[ts-ts]`=定稿句已提交给 LLM；
+  `→ LLM 请求中…`=LLM 请求已发出等首 token（controller `on_llm_start`，首 delta 原地覆盖）；
+  `× LLM 出错`=流抛异常（`on_llm_error`）；`[门控]`=回声门控转换提示
+  （AI 播放期 mic 只听"停下"，此刻说话不被识别——离远/音量低时 VAD 不闭句，句子
+  "悬在流式 cache"永远不定稿，正是`… `行无后续的成因）。
 - headless 测试：`tmp/test_dialogue.py`（gitignored）——fake LLM/TTS 覆盖切句/barge-in/
   hold-off/hard_stop/busy/压缩/引擎钩子（`RealtimeASR.__new__` 绕过模型加载）。
 
@@ -128,6 +154,7 @@ reports/         bench 报告（gitignored）
 
 - `docs/asr-architecture-decision.md` = **选型结论与硬指标**（ADR，从立项第一天写起）。
 - `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比/**§9 热词纠错（同音字）**）。
+- `docs/voice-dialogue.md` = **语音对话参数白话解释**（vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表）。
 - `docs/backend-guide.md` = **新增后端接入指南**（流式/非流式后端契约、三步接入清单、引擎消费语义、验收纪律，接 SenseVoice 等新模型时先读）。
 - `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。
