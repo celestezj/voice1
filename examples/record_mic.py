@@ -93,6 +93,8 @@ def main():
                     help="流式逐块出字（on_partial 边说边出 + 句末 flush 定稿）")
     ap.add_argument("--input-device", default=None,
                     help="麦克风设备：序号或名称子串（默认系统默认输入设备）")
+    ap.add_argument("--hotword-file", default=None,
+                    help="热词文件路径（每行一个纠错项，拼音级；所有后端统一生效）")
     args = ap.parse_args()
 
     input_idx, dev_sr = pick_input_device(args.input_device)
@@ -113,7 +115,7 @@ def main():
     print("麦克风信号正常（RMS %.1f dBFS）" % (20 * np.log10(rms + 1e-12)), flush=True)
 
     asr = RealtimeASR(backend=args.backend, device=args.device, streaming=args.streaming,
-                      profile=True)
+                      profile=True, hotword_file=args.hotword_file)
     asr.on_sentence(lambda r: print("[%.2fs] %s (ttfb=%.3fs)"
                                     % (r.audio_end, r.text, r.ttfb)))
     if args.streaming:

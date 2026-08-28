@@ -146,7 +146,7 @@ asr = RealtimeASR(
 | `debug` | `False` | 打印加载/打断/识别诊断 | `debug=True` |
 | `interrupt_words` | `None` | 打断词列表，非空启用 KWS 旁路 | `interrupt_words=["停下"]` |
 | `streaming` | `False` | 流式逐帧出字（T13）。`True` 且后端支持 → 逐块 `on_partial` + 句末 flush 定稿；后端不支持（whisper）→ 告警降级整句 | `streaming=True` |
-| `hotword_file` | `None` | 热词文件路径（T16，§9）。对识别文本做**拼音级纠错**（神庙→神妙），流式/整句都生效；后端不支持（whisper）→ 告警忽略 | `hotword_file="assets/hotwords/xiaoshuang.txt"` |
+| `hotword_file` | `None` | 热词文件路径（T16，§9）。**引擎级**对识别文本做**拼音级纠错**（神庙→神妙），**所有后端**（paraformer/whisper/sherpa）流式/整句统一生效 | `hotword_file="assets/hotwords/xiaoshuang.txt"` |
 
 **单例语义**：同一进程内 `RealtimeASR(...)` 多次调用返回**同一实例**（模型只加载一次）；
 仅当 `backend / device / vad_silence_tail_ms / interrupt_words / streaming / hotword_file`
@@ -452,16 +452,21 @@ cache 结果收尾拼接成完整句。所以尾字延迟 = 固定 VAD 尾（250
 v3-turbo 语料 CER 0.141 反而最差）。**解法是文本级热词纠错**：对识别结果按热词表做
 拼音级模糊替换，把模型选错的字纠正过来。
 
-**用法**（`hotword_file` 指向热词文件；仅 paraformer 后端，online 流式 / offline 整句都生效）：
+**用法**（`hotword_file` 指向热词文件；**引擎级后处理，所有后端统一生效**——
+paraformer/whisper/sherpa、流式/整句都一样）：
 
 ```python
 asr = RealtimeASR(backend="paraformer", device="cuda",
                   hotword_file="assets/hotwords/xiaoshuang.txt")
 ```
 ```bash
-PYTHONIOENCODING=utf-8 python examples/transcribe_file.py 音频.mp3 \
-    --backend paraformer-offline --device cuda --hotword-file assets/hotwords/xiaoshuang.txt
+PYTHONIOENCODING=utf-8 python examples/transcribe_file.py 音频.mp3 --hotword-file assets/hotwords/xiaoshuang.txt
+PYTHONIOENCODING=utf-8 python examples/record_mic.py --hotword-file assets/hotwords/xiaoshuang.txt
 ```
+
+**实现位置**：纠错在**引擎层**（`RealtimeASR._correct`）对每句最终文本/流式 partial 统一应用，
+与识别后端无关——所以不需要各后端各自支持。流式跨块单词（"神/庙"分两次出）因后端返回的
+是**累计**文本，同样能命中。
 
 **热词文件格式**（每行一条，支持两种模式；`#` 开头为注释）：
 

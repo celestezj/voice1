@@ -17,8 +17,9 @@
   与句长无关（≈ VAD 尾长 + flush 耗时），首字延迟从"整句话说完"压到 ~0.3s。
   最终文本由流式定稿承担（CER 需 bench 把关）；异常自动退化整句。
 - **`wait()` 语义**：实时场景无 Job；`ingest_file()` 阻塞同步返回逐句结果，bench 兼容。
-- **热词纠错（T16）**：`hotword_file` 指向热词文件（每行一个目标词），paraformer 后端
-  对识别文本做**拼音级模糊纠错**（神庙→神妙）。流式/整句都生效；后端不支持则忽略并告警。
+- **热词纠错（T16）**：`hotword_file` 指向热词文件（每行一个纠错项），**引擎级文本
+  后纠错**——对最终/部分文本做拼音级模糊纠错（神庙→神妙），**所有后端统一生效**
+  （paraformer/whisper/sherpa）。流式/整句都生效；依赖缺失/文件错误 → 告警降级。
 - **插桩**：`profile`（逐句时序）/ `debug` 守卫，热路径零埋点。
 """
 import queue
@@ -68,22 +69,25 @@ class RealtimeASR:
         self._streaming = bool(streaming)
         self._hotword_file = hotword_file
 
-        # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）。
-        # T16：hotword_file 非空才透传后端（whisper 等不支持热词的后端忽略，不炸）
-        bcfg = {"hotword_file": hotword_file} if hotword_file else {}
-        try:
-            self._backend = get_backend(self._backend_name, device=device, **bcfg)
-        except TypeError:
-            if not hotword_file:
-                raise
-            print("[RealtimeASR] 后端 %s 不支持热词文件，已忽略 --hotword-file"
-                  % self._backend_name, flush=True)
-            self._backend = get_backend(self._backend_name, device=device)
+        # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）
+        self._backend = get_backend(self._backend_name, device=device)
         if self._debug:
             print("[RealtimeASR] 加载后端 %s 模型…" % self._backend_name, flush=True)
         self._backend.load()
         if self._backend.sr != self._sr:
             self._sr = self._backend.sr
+
+        # T16：引擎级热词纠错（所有后端统一生效）。文本级拼音模糊匹配，识别后改文本，
+        # 与后端无关；编译一次复用。依赖缺失/文件错误 → 告警降级（热词关闭），不影响识别。
+        self._hw_matcher = None
+        if self._hotword_file:
+            try:
+                from funasr.utils.postprocess_hotwords import build_postprocess_hotword_matcher
+                self._hw_matcher = build_postprocess_hotword_matcher(
+                    postprocess_hotword_file=self._hotword_file)
+            except Exception as e:
+                print("[RealtimeASR] 热词文件加载失败（热词关闭，识别不受影响）: %s" % e, flush=True)
+                self._hw_matcher = None
 
         # 打断词旁路（T12）：interrupt_words 非空 → 加载轻量 KWS；失败仅告警降级为"无打断"
         self._interrupt_detector = None
@@ -295,6 +299,17 @@ class RealtimeASR:
         if not getattr(self, "_inited", False):
             raise RuntimeError("RealtimeASR 已 close()，需重新构造")
 
+    def _correct(self, text):
+        """T16 引擎级热词纠错：拼音级模糊匹配（神庙→神妙），所有后端统一生效。
+
+        文本级后纠错（识别后改文本，与后端无关）。空文本/未配热词 → 原样返回；
+        对已纠正文本重复应用幂等（fuzzy 匹配 segment==target 时跳过）。
+        """
+        if self._hw_matcher is None or not text:
+            return text
+        updated, _ = self._hw_matcher.apply_text(text)
+        return updated
+
     def _worker_loop(self):
         while True:
             item = self._audio_q.get()
@@ -336,6 +351,7 @@ class RealtimeASR:
             return
         if not text or gen != self._gen or self._partial_cb is None:
             return
+        text = self._correct(text)      # T16 热词纠错：partial 也出"已纠错"文本（幂等）
         try:
             self._partial_cb(PartialResult(text, ts - self._t0, SentenceResult.now() - self._t0))
         except Exception:
@@ -400,6 +416,7 @@ class RealtimeASR:
                 text = self._backend.recognize(audio)
         else:
             text = preset_text
+        text = self._correct(text)      # T16 热词纠错：所有后端/流式定稿/整句统一生效
         t2 = SentenceResult.now()
         stale = (task_gen != self._gen)       # 识别期间被打断？
         a_start, a_end = s_ts - self._t0, e_ts - self._t0

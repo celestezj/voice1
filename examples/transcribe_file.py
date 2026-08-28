@@ -26,8 +26,8 @@ def main():
     ap.add_argument("--streaming", action="store_true",
                     help="流式逐块出字（on_partial 边说边出 + 句末 flush 定稿）")
     ap.add_argument("--hotword-file", default=None,
-                    help="热词文件路径（每行一个目标词；对识别文本做拼音级纠错，"
-                         "如 神庙→神妙；仅 paraformer，其他后端忽略）")
+                    help="热词文件路径（每行一个纠错项；引擎级拼音纠错，如 神庙→神妙，"
+                         "所有后端统一生效）")
     args = ap.parse_args()
 
     asr = RealtimeASR(backend=args.backend, device=args.device,

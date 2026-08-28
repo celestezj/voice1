@@ -338,14 +338,16 @@ curl 手动落盘绕过 huggingface_hub 跨域坑）。实测结果：
 FunASR 1.4.4 `AutoModel.generate` 内置 `postprocess_hotword_file`：rapidfuzz + pypinyin
 **拼音级模糊匹配**（神庙/神妙 拼音相同 → 相似度 1.0 自动替换）。接线到 paraformer 后端：
 
-- `ParaformerBackend(hotword_file=...)`：load() 编译 `PostprocessHotwordMatcher`；
-  `_correct()` 对返回文本统一应用。**坑**：流式 generate 返回**增量 delta**，跨块单词
-  （"神/庙"分两次返回）片段内匹配不到目标词 → 纠错在**本类统一对累计 `_partial_buf`**
-  应用（online 流式）或整句文本（offline），不在 generate 时透传。
-- 引擎 `RealtimeASR(hotword_file=...)` 透传；后端不支持（whisper）→ TypeError 捕获告警降级。
+- **纠错放引擎层，不在各后端**（T16 迭代后定案）：`RealtimeASR._correct()` 编译
+  `PostprocessHotwordMatcher`，对每句最终文本/流式 partial 统一应用——文本级后处理
+  与后端无关，**所有后端（paraformer/whisper/sherpa）统一生效**，后端无需各自支持。
+  **坑**：流式 generate 返回**增量 delta**，跨块单词（"神/庙"分两次返回）片段内匹配不到
+  目标词 → 但引擎拿到的是后端返回的**累计**文本，照样可命中；别在 generate 时透传
+  postprocess_hotword_file（delta 片段内匹配不到）。
 - 文件两种模式：**显式映射** `神庙=>神妙`（零误伤，推荐）+ **模糊目标** `神妙`（拼音级兜底）。
 - 实测（`assets/hotwords/xiaoshuang.txt`）：显式映射下 paraformer offline 四句**全部精确命中
-  原文**（神妙×2/心天/季候/四时/减少于）；online 流式同 100% 命中（ttfb ~0.1s）。
+  原文**（神妙×2/心天/季候/四时/减少于）；online 流式同 100% 命中（ttfb ~0.1s）；
+  whisper-large + 热词锚定句同样修复（神庙→神妙 等）；sherpa 亦生效。
 - **坑（模糊目标的副作用）**：对 2 字词可能吞相邻同音字——"的神妙"（deshenmiao vs shenmiao
   0.94）整窗替换删掉"的"；"必减少于"被"减少于"命中删掉"必"。**精度要求高必须用显式映射**。
 - 回归：paraformer/cuda 语料严格 CER 0.031（无热词 matcher=None 路径）零影响。

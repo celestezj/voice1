@@ -18,14 +18,6 @@
   不是累计假设——本类内部把 delta 拼进 `_partial_buf`，对外统一返回**累计**文本；
   `is_final=True` 句末收尾返回该句完整文本并清状态。`reset()` 清 cache + partial_buf。
   offline 变体抛 NotImplementedError（引擎整句路径兜底）。
-
-热词纠错（`hotword_file` 参数，T16）：FunASR 1.4.4 内置**文本级 postprocess hotwords**——
-rapidfuzz + pypinyin **拼音级模糊匹配**（神庙/神妙 拼音同为 shenmiao → 自动替换）。
-实测 paraformer-offline + 热词文件 {神妙 心天 四时 季候 减少于} 锚定句同音字 100% 修复。
-**实现要点**：纠错不在 generate 时透传 postprocess_hotword_file（流式 delta 是增量片段，
-跨块单词"神/庙"分两次返回，片段内匹配不到目标词），而在**本类统一对返回文本/累计
-buf 调 `_correct()`**——online 流式对 `_partial_buf` 累计文本纠（跨块词可命中），
-offline 整句对完整文本纠。对已纠正文本重复应用是幂等的（fuzzy 中 segment==target 跳过）。
 """
 import os
 
@@ -55,7 +47,7 @@ class ParaformerBackend(ASRBackend):
     sr = 16000
     supports_streaming = True          # 类默认；offline 变体在 __init__ 覆写为 False
 
-    def __init__(self, device="auto", model_id=None, variant="online", hotword_file=None):
+    def __init__(self, device="auto", model_id=None, variant="online"):
         if variant not in _VARIANTS:
             raise ValueError("未知 paraformer 变体: %r（可选: %s）"
                              % (variant, "/".join(sorted(_VARIANTS))))
@@ -63,8 +55,6 @@ class ParaformerBackend(ASRBackend):
         self._variant = variant
         self._hub_id = model_id or _VARIANTS[variant]["hub"]
         self.supports_streaming = _VARIANTS[variant]["streaming"]   # 实例级：offline=False
-        self._hotword_file = hotword_file
-        self._hotword_matcher = None     # T16：拼音级热词纠错（load() 时编译）
         self._model = None
         self._cache = None
         self._partial_buf = ""       # 流式 delta 累积（FunASR 返回增量，须拼接成累计文本）
@@ -93,17 +83,6 @@ class ParaformerBackend(ASRBackend):
                             return cand
         return None
 
-    def _correct(self, text):
-        """T16 热词后纠错：拼音级模糊匹配，同音字（神庙→神妙）自动修正。
-
-        空文本/未配热词 → 原样返回。对已纠正文本重复应用幂等（fuzzy 匹配
-        segment==target 时跳过，显式替换 wrong→right 后 wrong 不再出现）。
-        """
-        if self._hotword_matcher is None or not text:
-            return text
-        updated, _ = self._hotword_matcher.apply_text(text)
-        return updated
-
     # -- ASRBackend 协议 ------------------------------------------------
     def load(self):
         try:
@@ -121,16 +100,6 @@ class ParaformerBackend(ASRBackend):
         # 本地缓存优先（离线零网络，满足硬指标"权重缓存后零网络请求"）；缺失才走 hub
         model = self._local_model_dir() or self._hub_id
         self._model = AutoModel(model=model, device=device, disable_update=True)
-        # T16：编译热词纠错器（拼音级模糊匹配；依赖缺失/文件错误 → 告警降级，不影响识别）
-        self._hotword_matcher = None
-        if self._hotword_file:
-            try:
-                from funasr.utils.postprocess_hotwords import build_postprocess_hotword_matcher
-                self._hotword_matcher = build_postprocess_hotword_matcher(
-                    postprocess_hotword_file=self._hotword_file)
-            except Exception as e:
-                print("[paraformer] 热词文件加载失败（热词关闭，识别不受影响）: %s" % e, flush=True)
-                self._hotword_matcher = None
 
     def recognize(self, audio):
         """整段（句子级）识别。online：is_final=True 末 chunk 不截断；offline：原生 generate。"""
@@ -139,9 +108,8 @@ class ParaformerBackend(ASRBackend):
             res = self._model.generate(input=a)          # 离线整句：无 chunk CFG
         else:
             res = self._model.generate(input=a, is_final=True, **_CFG)
-        text = (res[0]["text"] if isinstance(res, list)
+        return (res[0]["text"] if isinstance(res, list)
                 else res.get("text", str(res))).strip()
-        return self._correct(text)      # T16 热词纠错（整句完整文本，同音字可命中）
 
     def recognize_stream(self, chunk, is_final=False):
         """流式增量（T13）：逐块出字 + 句末 flush 定稿。仅 online 变体。
@@ -163,9 +131,8 @@ class ParaformerBackend(ASRBackend):
             final = self._partial_buf
             self._partial_buf = ""       # 流结束：清累积 + cache（下句从零开始）
             self._cache = None
-            return self._correct(final)  # T16：对完整累计文本纠错（跨块单词也能命中）
-        # 部分文本也纠（对外统一出"已纠错"累计文本；幂等，无副作用）
-        return self._correct(self._partial_buf)
+            return final
+        return self._partial_buf
 
     def reset(self):
         """清流式状态（新句子 / interrupt）。"""
