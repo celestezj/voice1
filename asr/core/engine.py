@@ -117,6 +117,7 @@ class RealtimeASR:
         self._shutdown = False
         self._cb = None
         self._partial_cb = None                    # T13 流式逐块出字回调
+        self._interrupt_cb = None                  # T18 打断回调（KWS 命中→上层硬停）
         self._sentences = []                       # profile 时收集
         self._next_idx = 1
         self._t0 = time.monotonic()                # 会话起点（时序基准）
@@ -146,6 +147,17 @@ class RealtimeASR:
         """
         old = self._partial_cb
         self._partial_cb = callback
+        return old
+
+    def on_interrupt(self, callback):
+        """设置打断回调 `cb()`（无参）——用户说了打断词（如"停下"）→ 立即通知上层。
+
+        在 `interrupt()` 状态清理后触发（KWS 命中旁路与 `ingest_kws_only` 都经
+        `interrupt()`，天然覆盖）。上层（如语音对话控制器）据此终止 LLM 与 TTS 输出。
+        返回旧回调。
+        """
+        old = self._interrupt_cb
+        self._interrupt_cb = callback
         return old
 
     def ingest(self, audio, source_ts=None):
@@ -180,6 +192,28 @@ class RealtimeASR:
                     traceback.print_exc()
 
         self._audio_q.put((self._gen, audio, source_ts))
+
+    def ingest_kws_only(self, audio):
+        """只喂打断词 KWS、不入队识别（T18 回声半双工门控用）。
+
+        TTS 播放时麦克风必采到扬声器回声——照常识别则"AI 的话"会被当成"用户的话"
+        反馈进 LLM。门控期调本方法：音频只经轻量 KWS 检测打断词（如"停下"），命中
+        → `interrupt()`（触发 on_interrupt）；回声本身不进识别管线、不占 VAD。
+        `interrupt_words` 未设（无检测器）→ 直接返回（零开销）。
+        """
+        self._check_alive()
+        det = self._interrupt_detector
+        if det is None:
+            return
+        try:
+            if det.feed(audio):
+                self.interrupt()
+                if self._debug:
+                    print("[asr] 打断词命中（kws_only 旁路）→ 排队任务已作废", flush=True)
+        except Exception:
+            if self._debug:
+                import traceback
+                traceback.print_exc()
 
     def ingest_file(self, path, chunk_ms=100):
         """同步识别整个音频文件（重采样 16k + VAD 断句 + 逐句识别）。
@@ -255,6 +289,12 @@ class RealtimeASR:
                     self._audio_q.get_nowait()
                 except queue.Empty:
                     break
+        cb = self._interrupt_cb
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def close(self):
         """销毁（幂等）：停线程 → 关后端 → 清单例槽位。`with`/`__del__`/atexit 兜底。"""

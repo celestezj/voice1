@@ -21,3 +21,6 @@ __pycache__/
 
 # Claude Code 本地配置（含机器相关权限，不入库）
 .claude/
+
+# 本地机密配置（LLM API key 等，绝不入库）
+dialogue/config.local.json

@@ -34,6 +34,7 @@
 - **跑带中文输出的命令加 `PYTHONIOENCODING=utf-8`**：Windows 默认 GBK 会直接崩。
 - **权重/缓存重定向到项目内 `.cache/`**（`HF_HOME`/`HF_ENDPOINT`/`MODELSCOPE_CACHE` 在模块里已设好）；首次下载走 `HF_ENDPOINT=https://hf-mirror.com` 镜像（huggingface.co 直连被墙）。
 - git 仓库根即 `E:\temp\voice1`（独立仓库，**不含 voice0 内容**；`third_party/` 是 gitignored 的上游 clone，别在里面提交）。
+- **`voice-asr` 也是 voice0(TTS) 的运行环境（两项目共享，实测 2026-08-28）**：voice-asr 当初从 voice-tts 克隆，是 voice-tts 的**严格超集**——voice0 的 melo 后端（`from melo.api import TTS`，导入名是 `melo` 不是 `MeloTTS`）在 voice-asr 可直接跑（合成冒烟通过）。同进程组合示例见 `examples/use_with_voice0_tts.py`（TTS→ASR→TTS 闭环）。**组合时 HF_HOME 是唯一可能冲突的环境变量**：melo 用 voice0/.cache/hf，voice1 仅 whisper 后端才用 HF_HOME（默认 paraformer 走 MODELSCOPE_CACHE，无冲突）——显式播种见该示例。**cosy 后端不能与 melo/ASR 同进程**（voice0 设计约束：cosy 注入 transformers 4.51.3，与主环境 4.57.6 冲突，须独立子进程）。
 
 ## 关键坑（非显而易见的，先看再动）
 
@@ -63,6 +64,38 @@
 - **麦克风电平够不着 VAD 门限 → "说话没反应"（T17c 实测）**：VAD 断句门限 -35dB，但不少麦克风说话 RMS 只有 -36~-46dB（本机 HD Audio 麦实测 6s 仅 24/300 帧过阈）——**录音正常、识别全无**。`check_mic_signal` 只拦"全哑（<-80dB）"拦不住这个。解法：record_mic 用 `MicAGC` 采集层自适应放大（目标 peak 0.3、只放大不压小、上限 8x；底噪放满仍 ~-50dB 不会误断句）。**引擎层故意不归一（T12d），mic 层负责**。排查 mic 无反应先跑 `tmp/probe_mic.py` 看电平与过阈帧数。
 - **麦克风 16kHz / 模型 16kHz**：采样率与 voice0 TTS（44.1kHz）不同，两条链路各管各的。
 - **回声/双讲（AEC）**：若与 voice0 组合成语音对话，麦克风会收到喇叭声音，需回声消除。
+- **MeloTTS-Chinese 被切成 Xet 存储 → huggingface_hub 绕开缓存重下 208M（2026-08-29 实测）**：仓库启用 Xet 后，新版 huggingface_hub 把 xet 仓库当"未缓存"，即使权重完整躺在 voice0/.cache/hf 也重新下载 config.json+checkpoint.pth（hf-mirror ~70kB/s，卡 46 分钟）。修复：组合程序 import 前设 `HF_HOME=voice0/.cache/hf` **且** `HF_HUB_DISABLE_XET=1`（实测 0.55s 命中缓存零下载）。voice_dialogue/use_with_voice0_tts/test_e2e 已内置；写新的 voice0-melo 组合程序时别忘了这两行。
+
+## 语音对话子程序（voice1 ASR + DeepSeek LLM + voice0 TTS）
+
+单进程非阻塞编排：`dialogue/` 包（LLM 客户端 + 对话控制器 + 麦克风基建）＋
+`examples/voice_dialogue.py` 主程序。**只读引用 voice0**（TTS 组件在 voice0 仓库，
+不在这里改；本程序把 voice0 路径塞进 `sys.path` 导入 `from tts import RealtimeTTS`）。
+
+- **跑法**（中文输出必须 `PYTHONIOENCODING=utf-8`）：
+  `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda`
+- **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
+  **绝不提交/绝不外传**）；读取优先级 显式参数 > 配置文件 > 环境变量 `DEEPSEEK_API_KEY`。
+- **打断（barge-in）**：LLM 在途时来新 ASR 句 → `gen` 代际 +1 弃流（生成器 close 关连接），
+  **重发本轮累计**（句1+句2…）；被作废的回复不 commit 历史。
+- **停用词"停下"**：`--interrupt-words`（默认"停下"）。KWS 旁路命中 → `interrupt()` →
+  `on_interrupt` 回调 → 控制器 `hard_stop()`：立即终止 LLM 流与 TTS 输出；**被打断的问题
+  保留进历史**，"停下"本身经 KWS 旁路吞掉、绝不进历史/LLM 输入。
+- **回声半双工门控（v1）**：TTS 播放期（`ctrl.tts_busy`）mic 只喂 `asr.ingest_kws_only()`
+  （只听"停下"，回声不进识别 → 无反馈自答）；`--no-echo-gate` 关（耳机近场可用）。
+  忙碌跟踪靠 voice0 `Job.done` + 守护 watcher 线程（voice0 无播放回调且不可改）。
+- **首句 hold-off**：`--reply-hold`（默认 0.35s）——每轮回复首句先锁外延迟，给用户续句
+  打断窗口；hold 内 barge → 弃句绝不播。代价是每轮首包音频 +0.35s。
+- **历史压缩**：`--max-context-tokens`（默认 40000）。DeepSeek `include_usage` 精确
+  `prompt_tokens` 计量；超阈值（预留 `headroom` 4000）且 LLM 空闲 → **一次性后台线程**
+  调 LLM 压缩旧历史为摘要，最近 `recent_keep`（6）条原样保留，摘要拼进 system
+  （【此前对话摘要】）。事件驱动，**无常驻监控线程**。压缩任务有快照竞态防护：换入前校验
+  `_history` 未变，变了放弃本轮下轮再压。
+- **线程纪律**：`feed_asr_sentence` 在 ASR worker 线程只做快操作（累加/gen/起 LLM 线程），
+  绝不阻塞识别；锁序固定 `controller._lock(RLock) → tts._submit_lock`（RLock 因 finally
+  在锁内 `_submit_tts` 会重入）。TTS 默认 `mode="queue"` 非打断。
+- headless 测试：`tmp/test_dialogue.py`（gitignored）——fake LLM/TTS 覆盖切句/barge-in/
+  hold-off/hard_stop/busy/压缩/引擎钩子（`RealtimeASR.__new__` 绕过模型加载）。
 
 ## 代码结构
 
@@ -79,8 +112,13 @@ asr/
 ├── paraformer/  ParaformerBackend（默认主力，FunASR 流式，cache 模式可增量）
 ├── whisper/     WhisperBackend（可选高精度，离线非流式，本地缓存路径加载）
 └── sherpa/      SherpaBackend（CPU 轻量基线，sherpa-onnx zipformer）
+dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + compress）/
+                 controller.py（DialogueController：barge-in/hard_stop/tts_busy/hold-off/历史压缩）/
+                 mic.py（MicAGC/check_mic_signal/pick_input_device）
+                 config.local.json（机密 API key，gitignored，绝不提交）
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）
-examples/        transcribe_file / record_mic / demonstrate_interrupt（T12）/ demonstrate_streaming（T13）
+examples/        transcribe_file / record_mic / demonstrate_interrupt（T12）/ demonstrate_streaming（T13）/
+                 use_with_voice0_tts（共享 voice-asr 环境组合 demo）/ voice_dialogue（语音对话主程序）
 docs/            asr-architecture-decision.md（ADR，选型/标定/环境决策）
 assets/          验收语料（CER 裁判集）
 reports/         bench 报告（gitignored）
