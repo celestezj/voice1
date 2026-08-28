@@ -86,6 +86,23 @@ class DialogueController:
         with self._lock:
             return list(self._history)
 
+    def snapshot(self):
+        """当前对话状态完整快照（供主程序本地持久化）。
+
+        锁内只做浅拷贝（list/str，微秒级），真正的磁盘写入由调用方在锁外做——
+        因此周期性存档**不阻塞** LLM 读流线程。字段即 LLM 可见的完整输入：
+        system（系统提示词，永不压缩）+ summary（压缩摘要，拼在 system 后）+
+        history（已 commit 轮次）+ 未提交的进行中内容。
+        """
+        with self._lock:
+            return {
+                "system": self._system,
+                "summary": self._summary,
+                "history": list(self._history),
+                "user_turn": self._user_turn,
+                "assistant_full": self._assistant_full,
+            }
+
     @property
     def tts_busy(self):
         """TTS 是否在播/待播（回声门控依据）。GIL 原子读，mic 回调每块直读无锁。"""

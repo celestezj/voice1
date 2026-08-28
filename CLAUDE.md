@@ -82,6 +82,13 @@
   直觉（"你停多久算说完""AI 答完但音频没播的空档""回声防护"），别只念数值。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > 配置文件 > 环境变量 `DEEPSEEK_API_KEY`。
+- **自定义系统提示词**：`--system-prompt <文件>`。系统提示词**永不压缩、永远放消息最前**
+  （`_build_messages_locked` 把它作 system role，摘要拼在其后、历史之前）。
+- **本地会话存档（默认开）**：`--history-dump` / `--history-dump-dir`（默认 `sessions/`，
+  已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把 `ctrl.snapshot()` 的
+  **完整对话状态**（system+summary+history+进行中内容）原子覆盖写到
+  `session_<启动时间戳>.json`（每次启动新建；退出再写一次）。后台线程写盘，`snapshot()`
+  锁内只浅拷贝、IO 在锁外——**不阻塞 LLM 线程**。
 - **打断（barge-in）**：LLM 在途时来新 ASR 句 → `gen` 代际 +1 弃流（生成器 close 关连接），
   **重发本轮累计**（句1+句2…）；被作废的回复不 commit 历史。
 - **停用词"停下"**：`--interrupt-words`（默认"停下"）。KWS 旁路命中 → `interrupt()` →
@@ -157,7 +164,7 @@ reports/         bench 报告（gitignored）
 
 - `docs/asr-architecture-decision.md` = **选型结论与硬指标**（ADR，从立项第一天写起）。
 - `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比/**§9 热词纠错（同音字）**）。
-- `docs/voice-dialogue.md` = **语音对话使用 + 架构**（快速开始含推荐 `--vad-tail 300`；参数白话解释 vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表；mermaid 线程时序图 + 阻塞/非阻塞说明）。
+- `docs/voice-dialogue.md` = **语音对话使用 + 架构**（快速开始含推荐 `--vad-tail 300`；自定义系统提示词 `--system-prompt`；会话历史存档 `--history-dump`；参数白话解释 vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表；mermaid 线程时序图 + 阻塞/非阻塞说明）。
 - `docs/backend-guide.md` = **新增后端接入指南**（流式/非流式后端契约、三步接入清单、引擎消费语义、验收纪律，接 SenseVoice 等新模型时先读）。
 - `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。

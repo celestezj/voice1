@@ -16,6 +16,9 @@ tmp/
 # 录音产物 / 测试语料原始音频（大文件不入库，语料文本源可入 assets/）
 *.wav
 
+# 语音对话本地会话存档（对话内容隐私，不入库）
+sessions/
+
 # Python
 __pycache__/
 
@@ -24,3 +27,4 @@ __pycache__/
 
 # 本地机密配置（LLM API key 等，绝不入库）
 dialogue/config.local.json
+dialogue/user_prompt.txt

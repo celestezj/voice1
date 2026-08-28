@@ -41,6 +41,7 @@ post-commit barge 已接管续句打断，hold 只保护首句边界后 0.35s �
     PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py [--asr-device cuda] [--tts-device cuda]
 """
 import argparse
+import json
 import os
 import sys
 import threading
@@ -68,6 +69,27 @@ from dialogue.mic import MicAGC, check_mic_signal, pick_input_device  # noqa: E4
 from asr.core.audio import resample_to   # noqa: E402
 
 SR = 16000
+
+
+def dump_session(path, ctrl):
+    """把控制器当前对话状态完整写入 path（原子：先写 .tmp 再 rename，写一半崩溃不损坏）。
+
+    `ctrl.snapshot()` 锁内浅拷贝后即释放锁，磁盘 IO 在这里（调用方线程）做——
+    周期性存档**不阻塞** LLM 读流线程。
+    """
+    snap = ctrl.snapshot()
+    payload = {
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "system_prompt": snap["system"],          # 永不压缩，完整保留
+        "compressed_summary": snap["summary"] or "",
+        "history": snap["history"],               # [{"role","content"}, ...] 已 commit 轮次
+        "user_turn_in_progress": snap["user_turn"],
+        "assistant_in_progress": snap["assistant_full"],
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 class _Console:
@@ -185,7 +207,18 @@ def main():
                     help="上下文 token 预算：超阈值触发历史压缩（默认 40000）")
     ap.add_argument("--max-history", type=int, default=0,
                     help="历史硬上限条数（0=不限制，由 token 预算管理）")
-    ap.add_argument("--system-prompt", default=None, help="可选：系统提示词文件路径（UTF-8）")
+    ap.add_argument("--system-prompt", default=None,
+                    help="可选：系统提示词文件路径（UTF-8）。系统提示词永不压缩、永远放在消息"
+                         "最开头（历史压缩只动历史，摘要拼在系统提示词之后）")
+    ap.add_argument("--history-dump", action=argparse.BooleanOptionalAction, default=True,
+                    help="本地会话存档（默认开）：把完整对话历史（系统提示词+压缩摘要+全部"
+                         "轮次）每 --history-dump-interval 秒覆盖写到 "
+                         "--history-dump-dir/session_<启动时间>.json；每次启动新建一个文件，"
+                         "程序退出再写一次；后台线程写盘不阻塞对话")
+    ap.add_argument("--history-dump-dir", default="sessions",
+                    help="会话存档目录（默认 sessions/，相对当前目录；已 gitignore）")
+    ap.add_argument("--history-dump-interval", type=int, default=300,
+                    help="会话存档间隔秒（默认 300=5 分钟；0=只退出时写一次）")
     args = ap.parse_args()
 
     # ---- 麦克风 ----
@@ -275,6 +308,34 @@ def main():
           % (interrupt_words, "开" if args.echo_gate else "关", args.vad_tail,
              args.post_commit_window, args.echo_guard),
           flush=True)
+
+    # ---- 本地会话存档（后台线程，每 interval 覆盖写；不阻塞 LLM/识别/TTS）----
+    dump_path = None
+    dump_stop = threading.Event()
+    dumper_thread = None
+    if args.history_dump and args.history_dump_dir:
+        os.makedirs(args.history_dump_dir, exist_ok=True)
+        dump_path = os.path.join(args.history_dump_dir,
+                                 "session_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+        print("会话存档：每 %ds 更新到 %s（退出时再写一次）"
+              % (args.history_dump_interval, dump_path), flush=True)
+
+        def _dumper():
+            while True:
+                try:
+                    dump_session(dump_path, ctrl)
+                except Exception as e:
+                    print("[存档] 写入失败: %s" % e, flush=True)
+                if dump_stop.wait(args.history_dump_interval):
+                    return
+
+        if args.history_dump_interval > 0:
+            dumper_thread = threading.Thread(target=_dumper, name="dialogue-dump",
+                                             daemon=True)
+            dumper_thread.start()
+        else:
+            dump_session(dump_path, ctrl)          # 间隔 0：只退出时写，先建文件占位
+
     tts.submit("你好，我在听。")                    # 非阻塞：后台播就绪语
     agc = MicAGC()
 
@@ -325,11 +386,21 @@ def main():
     except sd.PortAudioError as e:
         print("\n错误：打不开输入设备 %s 的音频流：%s" % (dev["name"], e), flush=True)
     finally:
+        if con.dirty:                              # 先收尾在途控制台行，避免后续打印穿插
+            sys.stdout.write("\n")
+            con.dirty = False
+        if dump_path is not None:
+            dump_stop.set()                        # 停后台存档线程（写完整再退）
+            if dumper_thread is not None:
+                dumper_thread.join(timeout=2)
+            try:
+                dump_session(dump_path, ctrl)      # 程序终止前最后写一次
+                print("已写会话存档：%s" % dump_path, flush=True)
+            except Exception as e:
+                print("[存档] 退出写入失败: %s" % e, flush=True)
         asr.close()
         ctrl.close()
         tts.close()
-        if con.dirty:
-            sys.stdout.write("\n")
         print("已退出。", flush=True)
 
 

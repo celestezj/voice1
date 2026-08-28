@@ -106,6 +106,30 @@ sequenceDiagram
 
 ---
 
+## 自定义系统提示词
+
+`--system-prompt 文件路径` 指定一个 UTF-8 文本文件作为系统提示词（角色设定/规则）。
+系统提示词**永不压缩、永远放在消息最开头**：对话历史超出上下文阈值时，压缩只动历史，
+生成的「此前对话摘要」拼接在系统提示词**之后**、历史之前——你的设定一条不丢。
+
+## 会话历史存档（本地记录，默认开）
+
+每 `--history-dump-interval` 秒（默认 **300**=5 分钟）把**完整对话状态**覆盖写到一个
+本地 JSON 文件：系统提示词 + 压缩摘要 + 全部已 commit 轮次 + 正在进行未提交的内容。
+
+- 文件：`--history-dump-dir`（默认 `sessions/`）下 `session_<启动时间戳>.json`——
+  **每次启动程序新建一个文件**；退出时（Ctrl+C 等）再写一次。
+- 后台线程写盘：`snapshot()` 在锁内只做浅拷贝（微秒级），磁盘 IO 在锁外——**不阻塞
+  LLM 线程**的正常读流。
+- 原子写（先写 `.tmp` 再改名）：中途崩溃/断电不会损坏已有存档。
+- `--no-history-dump` 关闭；`--history-dump-interval 0` 只退出时写一次；
+  `--history-dump-dir` 自定义目录（已 gitignore，对话内容不入库）。
+- 存档 JSON 结构：`system_prompt`（系统提示词原文）`compressed_summary`（若已压缩）
+  `history`（user/assistant 轮次数组）`user_turn_in_progress`（正在输入的话）
+  `assistant_in_progress`（正在生成的回复）。
+
+---
+
 ## 时间线全景（看懂这张图，参数就懂了一半）
 
 你说："我每天晚上" ──停顿──> "下班回来就是刷视频"（完整一句话）
