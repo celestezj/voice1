@@ -353,6 +353,45 @@ FunASR 1.4.4 `AutoModel.generate` 内置 `postprocess_hotword_file`：rapidfuzz 
 - 回归：paraformer/cuda 语料严格 CER 0.031（无热词 matcher=None 路径）零影响。
 - 软目标回填：ADR 目标清单第 17 行"热词纠偏"软目标由此达成。
 
+## 实施记录（T17 已完成 · 2026-08-28）— 可选后端评估：SenseVoice / Fun-ASR-Nano
+
+用户问"SenseVoice 模型怎么样？"。评估结论：**值得作为可选离线后端接入（接入成本低），
+但不改变实时主力 paraformer-streaming**。本轮**未接入**，待用户确认后按
+`docs/backend-guide.md` 三步接入 + bench 实测（CER/RTF/ttfb 对照）。
+
+### SenseVoice（SenseVoice-Small，2024/07，~234M）
+
+- **是什么**：通义 FunAudioLLM / FunASR 生态，一模型四任务——ASR（80+ 语种，含中/英/粤/日/韩）、
+  语种识别、6 种情感识别、音频事件检测（带时间戳）。**极快**：10s 音频约 70ms（RTF ~0.007），
+  INT8 <1GB 内存 CPU 可跑，比 whisper-large 快一个量级。
+- **对本项目硬指标的判定**：
+  - **流式 ✗（关键）**：官方不支持原生流式 → 只能当"VAD 断句 + 句子级识别"的**离线整句**后端，
+    定位同 paraformer-offline / whisper；**替代不了 paraformer-streaming 的实时主力**。
+  - **CER 待实测**：声称中文 WER ~3% 是自家口径，跑过本仓库 24 句裁判语料前不算数
+    （whisper-large"声称最强实测最差"是前车之鉴）。
+  - **同音字同样不解决**（神庙/神妙 是纯音频歧义）——但引擎级热词纠错（T16）对它**天然生效**，
+    无需后端任何工作。
+  - **离线可行**：权重在 ModelScope `iic/SenseVoiceSmall`，funasr 直接加载，进 `preload_asr.py` 即可。
+  - **真实优势：混中英识别**。中文技术口述夹英文（API/函数名/专有名词）时 paraformer 常把英文
+    搅乱，SenseVoice 混合文本更稳——若用户实际场景如此，这是比 CER 更实在的接入理由。
+  - **坑**：默认输出带情感/事件标签（`<|HAPPY|>`/`<|BGM|>`）+ 时间戳，纯转写须关；
+    默认不带标点（可挂 ct-punc，本项目"去标点比 CER"口径不强制）。
+- **结论**：可选离线后端 + 混中英价值成立；接入成本低（funasr 已装、热词自动生效）。
+
+### 顺带评估 Fun-ASR-Nano（2025/12，800M）
+
+支持**流式** + 7 种方言 + 26 种口音，数千万小时数据训练——是"比 paraformer 更准的**实时流式**"
+方向的正牌候选，比 SenseVoice 更贴本项目实时需求。同样未接入。
+
+### 澄清：非流式 ≠ 等全部说完
+
+VAD 断句 + 句子级识别下，用户连说 N 句（间隔 >250ms）**每句独立转换、句间互不等**；
+非流式只损失两点且都在句内——**句内无增量输出**（长句 5s 不断气则首字延迟 ≈ 句长 + 250ms
++ 推理）与**每句末 250ms 固定尾静音**。短句 + 自然停顿的听写场景感知不到延迟；实时主力
+仍是 paraformer-streaming（T13 流式已解决句内增量）。
+
+## 历史检查清单（T3-T12，已完成）
+
 - [x] T3 克隆 `voice-asr` 环境并验证 torch/CUDA 可用，快照入档（2026-08-27 通过）
 - [x] T4 候选后端最小验证：FunASR / faster-whisper / sherpa-onnx——RTF、峰值显存、权重可达性、流式 → 已回填对比表
 - [x] T5 建立验收语料：24 句中文已知文本 + voice0 melo TTS 合成音频（`assets/corpus/`，UTF-8 manifest，总时长 70.1s）

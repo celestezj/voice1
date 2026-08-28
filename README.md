@@ -160,7 +160,7 @@ asr/
 bench/           bench_asr.py（整句 CER/RTF）+ bench_streaming.py（流式 vs 整句出字延迟）
 examples/        transcribe_file / record_mic / demonstrate_interrupt / demonstrate_streaming（代码 case）
 preload_asr.py   权重预下载（一次性联网）
-docs/            ADR（选型/标定）/ engine-guide（引擎使用与原理）/ 环境版本锁定
+docs/            ADR（选型/标定）/ engine-guide（引擎使用与原理）/ backend-guide（新增后端接入）/ 环境版本锁定
 assets/corpus/   CER 验收语料（24 句 + manifest.json）
 assets/hotwords/ 热词文件示例（T16：xiaoshuang.txt 同音字纠错）
 ```
