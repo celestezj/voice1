@@ -5,6 +5,10 @@
 清单并友好退出，不抛 PortAudioError 裸错。可用 `--input-device` 指定设备（序号或
 名称子串）；非 16kHz 原生采样率的设备（如 48k 麦克风）自动重采样到引擎采样率。
 
+**麦克风自适应增益（MicAGC）**：VAD 断句门限 -35dB，不少麦克风说话电平只有
+-40dB 上下（录得到、但够不着门限 → "说话没反应"）。采集层自动放大到健康电平
+（目标 peak≈0.3，只放大不压小，上限 8x）。引擎层故意不归一，mic 层负责。
+
 用法（中文输出需 UTF-8 编码，Ctrl+C 退出）：
     PYTHONIOENCODING=utf-8 python examples/record_mic.py [--backend paraformer] [--device cuda] [--streaming] [--input-device <序号|名称>]
     --streaming：流式逐块出字（on_partial 边说边出 + 句末 flush 定稿，尾字延迟更低）
@@ -21,6 +25,35 @@ from asr import RealtimeASR
 from asr.core.audio import resample_to
 
 SR = 16000
+
+
+class MicAGC:
+    """麦克风自适应增益：把说话电平抬到 VAD/模型健康区间（目标 peak≈0.3）。
+
+    背景（T17c 实测）：VAD 断句门限 EnergyVAD.threshold_db = -35dB；本机 HD Audio
+    麦克风说话 RMS ≈ -36~-46dBFS，大多低于门限 → VAD 几乎不断句 →"对着麦说话没
+    反应"（录得到音、识别不到）。解法：放大到目标电平再喂引擎。
+
+    - 快攻慢放：以块峰值跟踪，说话立即抬增益，静音回落缓慢（防增益抽吸）；
+    - **只放大不压小**（min_gain=1x）：响亮麦克风原样通过，安静麦克风被抬升；
+    - 上限 8x（+18dB）：静音底噪即使放满也只有约 -50dB，仍低于 -35dB 门限，
+      不会把噪声底抬到误断句（T12d 噪声底抬高漏检的教训）。
+    """
+    def __init__(self, target_peak=0.3, max_gain=8.0, release=0.95):
+        self._target = float(target_peak)
+        self._max_gain = float(max_gain)
+        self._release = float(release)
+        self._peak = 1e-6
+
+    def apply(self, block):
+        x = np.asarray(block, dtype=np.float32)
+        if len(x) == 0:
+            return x
+        p = float(np.max(np.abs(x))) + 1e-9
+        self._peak = max(self._peak * self._release, p)   # 快攻（立即取新峰值）/慢放（按 release 回落）
+        gain = self._target / self._peak
+        gain = min(max(gain, 1.0), self._max_gain)        # 只放大，上限 8x
+        return x * np.float32(gain)
 
 
 def list_devices():
@@ -116,6 +149,7 @@ def main():
 
     asr = RealtimeASR(backend=args.backend, device=args.device, streaming=args.streaming,
                       profile=True, hotword_file=args.hotword_file)
+    agc = MicAGC()                      # 麦克风自适应增益（说话电平过低时自动放大）
     asr.on_sentence(lambda r: print("[%.2fs] %s (ttfb=%.3fs)"
                                     % (r.audio_end, r.text, r.ttfb)))
     if args.streaming:
@@ -125,13 +159,13 @@ def main():
                 last[0] = p.text
                 print("[流式出字] %s" % p.text, flush=True)
         asr.on_partial(_partial)
-    print("说话吧…（Ctrl+C 退出）", flush=True)
+    print("说话吧…（Ctrl+C 退出）[麦克风自动增益已启用，说话电平过低会自动放大]", flush=True)
 
     def cb(indata, frames, t, status):
         mono = np.ascontiguousarray(indata[:, 0], dtype=np.float32)
         if dev_sr != SR:
             mono = resample_to(mono, dev_sr, SR)      # 非 16k 设备 → 重采样到引擎采样率
-        asr.ingest(mono, source_ts=time.monotonic())
+        asr.ingest(agc.apply(mono), source_ts=time.monotonic())   # 放大到健康电平再喂引擎
 
     try:
         with sd.InputStream(samplerate=dev_sr, channels=1, device=input_idx, callback=cb):
