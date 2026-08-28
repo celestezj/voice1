@@ -311,6 +311,45 @@ whisper 自带 segment 时间戳只取窗口后段**新增**文本（重叠旧�
 `is_final=False` 时整窗 transcribe 取 `seg.end > _last_ts` 的新段拼接返回；`is_final=True` 整窗定稿。
 **触发条件**：仅在 cuda 场景、且用户明确要 whisper 精度实时时再启用。
 
+## 实施记录（T16 已完成 · 2026-08-28）
+
+**热词纠错（同音字）+ whisper-large 实测否决**。用户锚定问题：文学文本同音字识别错误
+（神妙→神庙×2、心天→新天、四时→四十、于→与），要求"上更大的模型"。实测证明**换模型是
+死路**，真正的解法是 FunASR 内置的**文本级热词后纠错（拼音级模糊匹配）**。
+
+### 需求缘起（同音字是纯音频歧义）
+
+`E:\temp\语音包\xiaoshuang.mp3`（里尔克《给青年诗人的信》节选）paraformer 流式输出错误：
+神庙/新天/四十/与。同音字 神庙↔神妙 拼音同为 `shenmiao`，纯声学上不可区分——NAT（paraformer）
+与自回归（whisper）的声学先验都不足以解决，必须引入**词汇先验**（热词偏置）。
+
+### whisper-large 实测（否决，T16）
+
+接入 large-v3-turbo（`mobiuslabsgmbh/faster-whisper-large-v3-turbo`，hf-mirror xet 仓库
+curl 手动落盘绕过 huggingface_hub 跨域坑）。实测结果：
+- **锚定句不修复**：神庙（句2）✗、新天+季后（句3）✗、四十（句4）✗。
+- **语料严格 CER 0.141**（规范 0.098）——全部后端最差（medium 0.120、paraformer 0.031），
+  s09 幻觉出"感谢观看"（0.615）。RTF 0.112✓ / ttfb 0.266s✓ 达标。
+- **结论**：turbo 蒸馏版在中文短句语料上质量不足；同音字问题换模型不解。**保留为可选后端**
+  （已接入、可加载、RTF 快），但文档标注"不建议"，默认推荐 paraformer + 热词。
+
+### 热词纠错（定案，用户拍板"接入热词纠错"）
+
+FunASR 1.4.4 `AutoModel.generate` 内置 `postprocess_hotword_file`：rapidfuzz + pypinyin
+**拼音级模糊匹配**（神庙/神妙 拼音相同 → 相似度 1.0 自动替换）。接线到 paraformer 后端：
+
+- `ParaformerBackend(hotword_file=...)`：load() 编译 `PostprocessHotwordMatcher`；
+  `_correct()` 对返回文本统一应用。**坑**：流式 generate 返回**增量 delta**，跨块单词
+  （"神/庙"分两次返回）片段内匹配不到目标词 → 纠错在**本类统一对累计 `_partial_buf`**
+  应用（online 流式）或整句文本（offline），不在 generate 时透传。
+- 引擎 `RealtimeASR(hotword_file=...)` 透传；后端不支持（whisper）→ TypeError 捕获告警降级。
+- 文件两种模式：**显式映射** `神庙=>神妙`（零误伤，推荐）+ **模糊目标** `神妙`（拼音级兜底）。
+- 实测（`assets/hotwords/xiaoshuang.txt`）：显式映射下 paraformer offline 四句**全部精确命中
+  原文**（神妙×2/心天/季候/四时/减少于）；online 流式同 100% 命中（ttfb ~0.1s）。
+- **坑（模糊目标的副作用）**：对 2 字词可能吞相邻同音字——"的神妙"（deshenmiao vs shenmiao
+  0.94）整窗替换删掉"的"；"必减少于"被"减少于"命中删掉"必"。**精度要求高必须用显式映射**。
+- 回归：paraformer/cuda 语料严格 CER 0.031（无热词 matcher=None 路径）零影响。
+- 软目标回填：ADR 目标清单第 17 行"热词纠偏"软目标由此达成。
 
 - [x] T3 克隆 `voice-asr` 环境并验证 torch/CUDA 可用，快照入档（2026-08-27 通过）
 - [x] T4 候选后端最小验证：FunASR / faster-whisper / sherpa-onnx——RTF、峰值显存、权重可达性、流式 → 已回填对比表

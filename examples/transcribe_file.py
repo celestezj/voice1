@@ -20,14 +20,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("wav", help="音频文件路径（wav/mp3/flac/ogg）")
     ap.add_argument("--backend", default="paraformer",
-                    help="paraformer(默认,流式)|paraformer-offline(离线高精度,整句)|whisper|sherpa")
+                    help="paraformer(默认,流式)|paraformer-offline(离线高精度,整句)|"
+                         "whisper|whisper-large(large-v3-turbo,同音字最强)|sherpa")
     ap.add_argument("--device", default="auto", help="auto|cpu|cuda")
     ap.add_argument("--streaming", action="store_true",
                     help="流式逐块出字（on_partial 边说边出 + 句末 flush 定稿）")
+    ap.add_argument("--hotword-file", default=None,
+                    help="热词文件路径（每行一个目标词；对识别文本做拼音级纠错，"
+                         "如 神庙→神妙；仅 paraformer，其他后端忽略）")
     args = ap.parse_args()
 
     asr = RealtimeASR(backend=args.backend, device=args.device,
-                      streaming=args.streaming, profile=True)
+                      streaming=args.streaming, profile=True,
+                      hotword_file=args.hotword_file)
     if args.streaming:
         last = [""]
         def _partial(p):

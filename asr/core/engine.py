@@ -17,6 +17,8 @@
   与句长无关（≈ VAD 尾长 + flush 耗时），首字延迟从"整句话说完"压到 ~0.3s。
   最终文本由流式定稿承担（CER 需 bench 把关）；异常自动退化整句。
 - **`wait()` 语义**：实时场景无 Job；`ingest_file()` 阻塞同步返回逐句结果，bench 兼容。
+- **热词纠错（T16）**：`hotword_file` 指向热词文件（每行一个目标词），paraformer 后端
+  对识别文本做**拼音级模糊纠错**（神庙→神妙）。流式/整句都生效；后端不支持则忽略并告警。
 - **插桩**：`profile`（逐句时序）/ `debug` 守卫，热路径零埋点。
 """
 import queue
@@ -37,13 +39,14 @@ class RealtimeASR:
 
     def __new__(cls, backend="paraformer", device="auto", sample_rate=16000,
                 vad_silence_tail_ms=250, profile=False, debug=False,
-                interrupt_words=None, streaming=False):
-        # 单例：backend/device/vad_tail/interrupt_words/streaming 任一变更 → 销毁重建；否则同一实例
+                interrupt_words=None, streaming=False, hotword_file=None):
+        # 单例：backend/device/vad_tail/interrupt_words/streaming/hotword_file 任一变更 → 销毁重建
         inst = cls._instance
         if inst is not None and (inst._backend_name != backend or inst._device != device
                                  or inst._vad_tail_ms != vad_silence_tail_ms
                                  or inst._interrupt_words != list(interrupt_words or [])
-                                 or inst._streaming != bool(streaming)):
+                                 or inst._streaming != bool(streaming)
+                                 or inst._hotword_file != hotword_file):
             inst.close()
             inst = None
         if inst is None:
@@ -52,7 +55,7 @@ class RealtimeASR:
 
     def __init__(self, backend="paraformer", device="auto", sample_rate=16000,
                  vad_silence_tail_ms=250, profile=False, debug=False,
-                 interrupt_words=None, streaming=False):
+                 interrupt_words=None, streaming=False, hotword_file=None):
         if getattr(self, "_inited", False):
             return
         self._backend_name = backend or "paraformer"
@@ -63,9 +66,19 @@ class RealtimeASR:
         self._debug = debug
         self._interrupt_words = list(interrupt_words) if interrupt_words else []
         self._streaming = bool(streaming)
+        self._hotword_file = hotword_file
 
-        # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）
-        self._backend = get_backend(self._backend_name, device=device)
+        # 惰性加载后端 + 模型（失败抛 BackendNotInstalledError 带提示）。
+        # T16：hotword_file 非空才透传后端（whisper 等不支持热词的后端忽略，不炸）
+        bcfg = {"hotword_file": hotword_file} if hotword_file else {}
+        try:
+            self._backend = get_backend(self._backend_name, device=device, **bcfg)
+        except TypeError:
+            if not hotword_file:
+                raise
+            print("[RealtimeASR] 后端 %s 不支持热词文件，已忽略 --hotword-file"
+                  % self._backend_name, flush=True)
+            self._backend = get_backend(self._backend_name, device=device)
         if self._debug:
             print("[RealtimeASR] 加载后端 %s 模型…" % self._backend_name, flush=True)
         self._backend.load()
@@ -107,9 +120,10 @@ class RealtimeASR:
         self._worker.start()
         self._inited = True
         if self._debug:
-            print("[RealtimeASR] 就绪（backend=%s device=%s sr=%d, VAD 尾长 %dms%s）"
+            print("[RealtimeASR] 就绪（backend=%s device=%s sr=%d, VAD 尾长 %dms%s%s）"
                   % (self._backend_name, self._device, self._sr, self._vad_tail_ms,
-                     ", 流式" if self._stream_capable else ""), flush=True)
+                     ", 流式" if self._stream_capable else "",
+                     ", 热词" if self._hotword_file else ""), flush=True)
 
     # ------------------------------------------------------------------ 生命周期
 

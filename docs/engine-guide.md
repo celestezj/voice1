@@ -132,6 +132,7 @@ asr = RealtimeASR(
     debug=False,                 # True 时打印加载/打断/逐句诊断信息
     interrupt_words=None,        # 非空则启用打断词旁路，如 ["停下"]（T12）
     streaming=False,             # True=流式逐帧出字（T13，后端须 supports_streaming）
+    hotword_file=None,           # 热词文件路径（每行一个纠错项，拼音级；仅 paraformer，T16）
 )
 ```
 
@@ -145,10 +146,11 @@ asr = RealtimeASR(
 | `debug` | `False` | 打印加载/打断/识别诊断 | `debug=True` |
 | `interrupt_words` | `None` | 打断词列表，非空启用 KWS 旁路 | `interrupt_words=["停下"]` |
 | `streaming` | `False` | 流式逐帧出字（T13）。`True` 且后端支持 → 逐块 `on_partial` + 句末 flush 定稿；后端不支持（whisper）→ 告警降级整句 | `streaming=True` |
+| `hotword_file` | `None` | 热词文件路径（T16，§9）。对识别文本做**拼音级纠错**（神庙→神妙），流式/整句都生效；后端不支持（whisper）→ 告警忽略 | `hotword_file="assets/hotwords/xiaoshuang.txt"` |
 
 **单例语义**：同一进程内 `RealtimeASR(...)` 多次调用返回**同一实例**（模型只加载一次）；
-仅当 `backend / device / vad_silence_tail_ms / interrupt_words / streaming` 任一**变更**
-时才销毁重建。
+仅当 `backend / device / vad_silence_tail_ms / interrupt_words / streaming / hotword_file`
+任一**变更**时才销毁重建。
 
 **`streaming` 一键切换**：`streaming` 变更会销毁重建单例（因为后端模型在前向模式下是否
 走流式 cache 是构造期状态）。流式 vs 非流式只是出字时机不同，**句末最终文本都是整句**
@@ -443,7 +445,41 @@ cache 结果收尾拼接成完整句。所以尾字延迟 = 固定 VAD 尾（250
 
 ---
 
-## 9. 常见疑问 FAQ
+## 9. 热词纠错（T16，同音字）
+
+**问题**：ASR 的**同音字**（神庙/神妙、心天/新天、四十/四时、季候/气候）是纯音频歧义——
+任何声学模型都分不出 `shenmiao` 是"神妙"还是"神庙"。换更大模型不解决（实测 whisper-large
+v3-turbo 语料 CER 0.141 反而最差）。**解法是文本级热词纠错**：对识别结果按热词表做
+拼音级模糊替换，把模型选错的字纠正过来。
+
+**用法**（`hotword_file` 指向热词文件；仅 paraformer 后端，online 流式 / offline 整句都生效）：
+
+```python
+asr = RealtimeASR(backend="paraformer", device="cuda",
+                  hotword_file="assets/hotwords/xiaoshuang.txt")
+```
+```bash
+PYTHONIOENCODING=utf-8 python examples/transcribe_file.py 音频.mp3 \
+    --backend paraformer-offline --device cuda --hotword-file assets/hotwords/xiaoshuang.txt
+```
+
+**热词文件格式**（每行一条，支持两种模式；`#` 开头为注释）：
+
+| 模式 | 写法 | 行为 | 适用 |
+|---|---|---|---|
+| **显式映射（推荐）** | `神庙=>神妙` | 出现"神庙"精确替换为"神妙" | 已知错误形式，**零误伤** |
+| **模糊目标** | `神妙`（单独一行） | 对文本做拼音级模糊匹配（rapidfuzz，默认阈值 0.85） | 兜底未知同音变体 |
+
+**实测**（`assets/hotwords/xiaoshuang.txt`，里尔克名言）：paraformer + 显式映射后
+四句全部精确命中原文——神庙→神妙×2、心天、季候、四时、减少于 全部纠正。
+
+**坑**：模糊目标对 2 字词可能**吞相邻同音字**——"的神妙"（`deshenmiao` vs `shenmiao`，
+相似度 0.94）整窗被替成"神妙"删掉"的"；"必减少于"被"减少于"命中删掉"必"。**精度要求高
+时用显式映射 `wrong=>right`**（确定性，只替换精确出现的错误形式），模糊目标仅兜底。
+
+---
+
+## 10. 常见疑问 FAQ
 
 **Q：为什么"停顿后继续说话"被断成两句、出两个回调？**
 A：VAD 把 `≥250ms` 静音当句尾（`vad_silence_tail_ms`）。停顿超过它 → 前一"句"出回调，

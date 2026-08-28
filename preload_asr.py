@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from asr.core.backend import get_backend
 
-_MODELS = ["paraformer", "paraformer-offline", "whisper", "sherpa"]
+_MODELS = ["paraformer", "paraformer-offline", "whisper", "whisper-large", "sherpa"]
 
 
 def main():

@@ -84,6 +84,19 @@ asr.on_sentence(lambda r: print("句末定稿:", r.text))   # VAD 断句后 flus
 #   PYTHONIOENCODING=utf-8 python examples/demonstrate_streaming.py 句1.wav 句2.wav ...
 ```
 
+**热词纠错**（T16，`hotword_file`，仅 paraformer）：对识别文本做**拼音级纠错**，修同音字
+（神庙→神妙、心天→新天、四十→四时——纯音频歧义，换更大模型也解不了，实测 whisper-large
+反而更差）。显式映射 `神庙=>神妙` 零误伤；模糊目标行兜底未知变体。流式/整句都生效。
+
+```python
+# 创建引擎时给热词文件；每行一个纠错项（见 assets/hotwords/xiaoshuang.txt 注释头）
+asr = RealtimeASR(backend="paraformer", device="cuda",
+                  hotword_file="assets/hotwords/xiaoshuang.txt")
+# 命令行：transcribe_file.py 音频.mp3 --backend paraformer-offline \
+#   --hotword-file assets/hotwords/xiaoshuang.txt
+# 后端不支持热词（whisper）→ 告警忽略，不中断
+```
+
 **`on_partial` vs `on_sentence`（一句话内两个回调）**：
 
 | | `on_partial`（流式，`streaming=True`） | `on_sentence`（通用） |
@@ -114,6 +127,7 @@ asr.on_sentence(lambda r: print("句末定稿:", r.text))   # VAD 断句后 flus
 | paraformer | cpu | 0.059 | 0.26 | — | CER/RTF 达标，CPU 尾字延迟略超 |
 | whisper (medium) | cuda | 0.120 | 0.139 | 0.370s | 高精度可选项（规范 CER 0.058；离线非流式） |
 | whisper (medium) | cpu | 0.132 | 2.66 | — | CPU 不可用 |
+| whisper-large (v3-turbo) | cuda | 0.141 | 0.112 | 0.266s | **不建议**（T16 实测：同音字不修、CER 最差，见已知限制） |
 | sherpa (14M) | cpu | 0.190 | 0.033 | 0.084s | 轻量基线（RTF 极优，质量不足） |
 
 > CER 口径：严格 = 去标点；规范 = 去标点 + 繁简统一 + 中文/阿拉伯数字归一（whisper 的数字/繁体形态差异归因用）。
@@ -148,6 +162,7 @@ examples/        transcribe_file / record_mic / demonstrate_interrupt / demonstr
 preload_asr.py   权重预下载（一次性联网）
 docs/            ADR（选型/标定）/ engine-guide（引擎使用与原理）/ 环境版本锁定
 assets/corpus/   CER 验收语料（24 句 + manifest.json）
+assets/hotwords/ 热词文件示例（T16：xiaoshuang.txt 同音字纠错）
 ```
 
 ## 已知限制
@@ -155,6 +170,8 @@ assets/corpus/   CER 验收语料（24 句 + manifest.json）
 - **尾字延迟 vs CER 权衡**（T10）：无单一 VAD tail 同时达标；实时 250ms、离线 600ms。
 - **paraformer 短句**：sherpa 基线对极短句有空文本/半句缺陷；paraformer/whisper 正常。
 - **whisper**：离线非流式，不支持"边说边出字"（`streaming=True` 会告警并降级为整句识别）。
+- **whisper-large（v3-turbo）不建议用**（T16 实测）：语料严格 CER 0.141 是全部后端最差（比 medium 0.120 还差），且同音字（神庙/新天/四十）**不修复**——同音字是纯音频歧义，非模型大小问题。已接入但**默认不推荐**，仅作扩展接口存在。同音字正确解法见下条热词。
+- **同音字正确解法是热词纠错（T16）**：`--hotword-file` 对识别文本做拼音级纠错（神庙→神妙），paraformer 流式/整句都生效，实测锚定句 100% 修复。**注意**：热词文件里的"模糊目标行"（单独一个词）对 2 字词可能吞相邻同音字，精度要求高时用"显式映射 `错误词=>正确词`"。详见 engine-guide §9。
 - **流式已实现**（T13）：`streaming=True` 逐块出字 + 句末 flush 定稿（见上表）；缺省 `streaming=False` 仍是整句识别。流式定稿 CER 0.017 优于整句 0.053，无 CER 代价。**文件同步也走流式**（`ingest_file` 随引擎模式；命令行 `transcribe_file.py --streaming`）。
 - **安静短句在流式路径可能漏断句**：VAD 能量门限 -35dB/最短句 250ms，过静音短句（如 corpus s01 原始电平）会被当噪声丢弃 → 与下一句合并（整句路径靠文件末 flush 兜底，流式无文件边界）。demo/bench 已做"只放大安静文件到 peak 0.10"的响度归一；真实麦克风电平通常达标。
 - **打断词命中需尾随音频**：流式 KWS 要 ~0.2-0.4s 尾随音频才能收尾解码（真实麦克风持续采样天然满足）；若音频流在「停下」后立即结束，命中延迟到后续音频到达。

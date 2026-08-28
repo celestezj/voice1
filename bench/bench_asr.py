@@ -141,7 +141,7 @@ def report(res, tag):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", default="all",
-                    choices=["all", "paraformer", "paraformer-offline", "whisper", "sherpa"])
+                    choices=["all", "paraformer", "paraformer-offline", "whisper", "whisper-large", "sherpa"])
     ap.add_argument("--device", default="all", choices=["all", "cpu", "cuda"])
     ap.add_argument("--tag", default="T9")
     ap.add_argument("--tail", type=int, default=250, help="VAD silence_tail_ms")
@@ -150,6 +150,7 @@ def main():
     combos = [("paraformer", "cuda"), ("paraformer", "cpu"),
               ("paraformer-offline", "cuda"), ("paraformer-offline", "cpu"),
               ("whisper", "cuda"), ("whisper", "cpu"),
+              ("whisper-large", "cuda"), ("whisper-large", "cpu"),
               ("sherpa", "cpu")]
     if args.backend != "all":
         combos = [c for c in combos if c[0] == args.backend]

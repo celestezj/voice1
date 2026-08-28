@@ -15,6 +15,8 @@ _BACKEND_MODULES = {
     # paraformer-large 离线版（文件整句高精度；非流式，实时流式仍用 paraformer=online）
     "paraformer-offline": ("asr.paraformer.backend", "ParaformerBackend", {"variant": "offline"}),
     "whisper": ("asr.whisper.backend", "WhisperBackend"),
+    # faster-whisper large-v3-turbo（文件转写高精度，同音字/文学词纠错最强；GPU-only 非流式）
+    "whisper-large": ("asr.whisper.backend", "WhisperBackend", {"model_id": "large-v3-turbo"}),
     "sherpa": ("asr.sherpa.backend", "SherpaBackend"),
 }
 

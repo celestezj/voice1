@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""WhisperBackend：faster-whisper medium 离线可选项。
+"""WhisperBackend：faster-whisper 离线可选项（medium 默认 / large-v3-turbo 高精度）。
 
 定位：GPU 高精度可选项（CER 下限最优），类比 voice0 的备用音源。
 离线非流式：句子级识别质量上限高，但无逐块增量——`recognize_stream` 抛 NotImplementedError，
 引擎按 ABC 契约回退"积累块 + 整句 recognize"（"边说边出字"不可用，选型时已知权衡）。
 首次联网下载（hf-mirror 镜像），缓存落 `.cache/hf/`。
+
+模型档位（`model_id` 参数 / get_backend 注册名 whisper=medium、whisper-large=large-v3-turbo）：
+- `medium`（默认）：现有基线（语料严格 CER 0.120，GPU 可用）。
+- `large-v3-turbo`（高精度）：自回归强 LM，对同音字/罕见文学词纠错最强
+  （large 明显强于 medium），8GB 显存可跑（float16 ~1.6GB）。
 """
 import os
 
@@ -17,8 +22,13 @@ _PROJ = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", os.path.join(_PROJ, ".cache", "hf"))
 
-_MODEL_ID = "medium"
-_REPO_ID = "Systran/faster-whisper-medium"
+# 档位 → CTranslate2 模型仓库（faster-whisper 直接吃 repo id）。
+# 注意：Systran 官方**没有** large-v3-turbo 转换（只有 large-v3），turbo 用社区
+# mobiuslabsgmbh 转换（镜像上 404 验证过 Systran 版本不存在）。
+_MODELS = {
+    "medium": "Systran/faster-whisper-medium",
+    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+}
 
 
 class WhisperBackend(ASRBackend):
@@ -27,17 +37,21 @@ class WhisperBackend(ASRBackend):
     supports_streaming = False     # 离线非流式：recognize_stream 抛 NotImplementedError
 
     def __init__(self, device="auto", model_id=None, language="zh", beam_size=5):
+        mid = model_id or "medium"
+        if mid not in _MODELS:
+            raise ValueError("未知 whisper 模型: %r（可选: %s）"
+                             % (mid, "/".join(sorted(_MODELS))))
         self._device = device
-        self._model_id = model_id or _MODEL_ID
+        self._model_id = mid
+        self._repo_id = _MODELS[mid]
         self._language = language
         self._beam_size = beam_size
         self._model = None
 
     # -- 本地缓存路径（离线零网络优先）---------------------------------
-    @staticmethod
-    def _local_model_dir():
+    def _local_model_dir(self):
         hub = os.path.join(_PROJ, ".cache", "hf", "hub",
-                           "models--" + _REPO_ID.replace("/", "--"), "snapshots")
+                           "models--" + self._repo_id.replace("/", "--"), "snapshots")
         if os.path.isdir(hub):
             for d in sorted(os.listdir(hub)):
                 cand = os.path.join(hub, d)
