@@ -179,6 +179,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asr-device", default="cuda", help="auto|cpu|cuda（ASR）")
     ap.add_argument("--tts-device", default="cuda", help="auto|cpu|cuda（TTS）")
+    ap.add_argument("--tts-normalize", choices=["rms", "agc"], default=None,
+                    help="TTS 响度归一化（默认 None=原样播放）：rms=逐句静态 RMS 对齐 "
+                         "-24dBFS（句间音量更一致）；agc=静态对齐+句内动态压缩+短停压缩"
+                         "（治句首轻/句尾轻/中间响，推荐）")
     ap.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True,
                     help="ASR 流式（默认开；--no-streaming 退化为整句）")
     ap.add_argument("--input-device", default=None, help="麦克风设备：序号或名称子串")
@@ -283,6 +287,7 @@ def main():
                       profile=True, hotword_file=args.hotword_file, debug=args.debug,
                       interrupt_words=interrupt_words)
     tts = RealtimeTTS(device=args.tts_device, backend="melo", mode="queue",
+                      normalize=args.tts_normalize,   # None=原样；rms/agc=响度归一化（voice0）
                       profile=True, debug=args.debug)
     ctrl = DialogueController(llm, tts, system_prompt=system_prompt,
                               max_history_messages=args.max_history or None,

@@ -28,6 +28,9 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - `--system-prompt dialogue/user_prompt.txt`：指定系统提示词文件（角色设定）。这里用项目
   里的 `dialogue/user_prompt.txt`（已 gitignore，内容自己编辑）；不用可去掉该参数，详见
   「自定义系统提示词」。
+- `--tts-normalize`：TTS 响度归一化（默认 None=原样播放）。`rms`=逐句静态 RMS 对齐
+  -24dBFS（句间音量更一致）；`agc`=静态对齐+句内动态压缩+短停压缩（句首轻/句尾轻/
+  中间响，推荐）。透传 voice0 `RealtimeTTS(normalize=…)`（voice0 只读，不改它）。
 - 打断词默认「停下」，回声门控默认开（半双工）。
 - 唤醒默认开（`--wake-word` 默认"小爱小爱"）：启动即休眠，说唤醒词才进对话，详见
   「休眠 / 唤醒 / 退出」。要恢复"启动即对话"旧行为：`--wake-word ""`。

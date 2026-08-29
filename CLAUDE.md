@@ -70,7 +70,8 @@
 
 单进程非阻塞编排：`dialogue/` 包（LLM 客户端 + 对话控制器 + 麦克风基建）＋
 `examples/voice_dialogue.py` 主程序。**只读引用 voice0**（TTS 组件在 voice0 仓库，
-不在这里改；本程序把 voice0 路径塞进 `sys.path` 导入 `from tts import RealtimeTTS`）。
+不在这里改；本程序把 voice0 路径塞进 `sys.path` 导入 `from tts import RealtimeTTS`；
+voice0 的参数在 voice1 的 CLI 上透传，如 `--tts-normalize` rms/agc 响度归一化）。
 
 - **跑法（推荐）**（中文输出必须 `PYTHONIOENCODING=utf-8`）：
   `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --system-prompt dialogue/user_prompt.txt`
