@@ -71,6 +71,12 @@ os.environ["HF_HOME"] = r"E:\temp\voice0\.cache\hf"      # voice0 melo/BERT 权�
 os.environ["NLTK_DATA"] = r"E:\temp\voice0\.cache\nltk_data"   # melo g2p 语料
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"      # 首次下载走镜像
 os.environ["HF_HUB_DISABLE_XET"] = "1"                   # 见上：xet 仓库会绕开缓存重下
+# 离线模式（权重全在 HF_HOME 缓存，纯离线程序）：transformers 加载 tokenizer 时
+# _patch_mistral_regex 会无条件对 huggingface.co 调 model_info()（判断是否 Mistral 修
+# 正则），未登录 IP 被限流 → HfHubHTTPError 429 启动即崩。离线模式整个跳过该网络调用，
+# 纯走缓存（2026-08-29 实测：完整 melo 加载+合成+播放 全离线 OK）。
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 import numpy as np                       # noqa: E402
 import sounddevice as sd                 # noqa: E402
 from asr import RealtimeASR              # noqa: E402  voice1
