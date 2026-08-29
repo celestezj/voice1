@@ -35,8 +35,9 @@ post-commit barge 已接管续句打断，hold 只保护首句边界后 0.35s �
     结束有两个途径：(a) 说退出词（默认"拜拜"，仅 AI 沉默时可说——AI 播放期只喂"停下"
     听不到它）→ 播"好的，我先退下啦…"回休眠；(b) 静默超时 `--inactive-timeout` 默认
     60s 无用户语音 → 播"一直不说话，我先退下啦…"回休眠。唤醒/退出词都逗号分隔多词。
-    `--wake-word ""` 关闭状态机 → 启动即对话（旧行为）。对话历史跨休眠保留：同一次
-    程序运行内休眠不清历史，只有程序重启才重建本地 session 存档。
+    `--wake-word ""` 关闭状态机 → 启动即对话（旧行为），**永不自动休眠**（休眠后无
+    唤醒途径=死机）。对话历史跨休眠保留：同一次程序运行内休眠不清历史，只有程序
+    重启才重建本地 session 存档。
 
 拆句根治（零固定延迟）：残句定稿立即发 LLM（无合并延迟）；AI 已答完、但音频还没开播
 （`--post-commit-window` 默认 1500ms，≈melo 首句合成延迟）时用户补句 → 控制器撤下刚
@@ -227,13 +228,15 @@ def main():
                          "--no-echo-gate 播放期可正常打断但接受回声，适合耳机）")
     ap.add_argument("--wake-word", default="小爱小爱",
                     help="唤醒词（逗号分隔，默认\"小爱小爱\"）：休眠期只听这些词，命中才进入"
-                         "对话。传空串（--wake-word \"\"）关闭唤醒 → 启动即对话（旧行为）")
+                         "对话。传空串（--wake-word \"\"）关闭唤醒 → 启动即对话（旧行为），且"
+                         "永不自动休眠（休眠后无唤醒途径=死机）")
     ap.add_argument("--exit-words", default="拜拜",
                     help="退出词（逗号分隔，默认\"拜拜\"）：对话期听到该词即播告别语并回休眠，"
                          "退出词本身不入对话历史。仅 AI 沉默时生效（AI 播放期只喂\"停下\"）")
     ap.add_argument("--inactive-timeout", type=int, default=60,
                     help="静默超时秒（默认 60）：对话期无用户语音持续这么久 → 播告别语并回休眠"
-                         "（告别语不入历史）。0=关闭自动休眠")
+                         "（告别语不入历史）。0=关闭自动休眠；唤醒关闭时本参数被忽略（永不"
+                         "自动休眠）")
     ap.add_argument("--vad-threshold-db", type=float, default=-35.0,
                     help="VAD 断句能量门槛 dB（默认 -35）：离麦克风远说话够不着门槛就不定稿"
                          "提交（只有 partial 不出字）。调低（如 -42）提升灵敏度，但环境噪声"
@@ -319,6 +322,10 @@ def main():
             print("[唤醒] 唤醒词检测加载失败（唤醒关闭，启动即对话）：%s" % e, flush=True)
             wake_det = None
             wake.state = ACTIVE              # 无唤醒检测器 → 不能休眠，直接对话
+    if wake_det is None:
+        # 无唤醒检测器（--wake-word "" 或检测器加载失败）→ 永不自动休眠：休眠后
+        # 无唤醒途径可回对话=死机。旧行为（无唤醒词）本就是启动即对话、永不休眠。
+        wake.inactive_timeout = 0
 
     def _say(text):
         """播就绪语/告别语（直连 TTS，不经 controller → 不入历史/LLM）。Job 记入
@@ -369,6 +376,7 @@ def main():
             on_user(r)                     # 退出词照常显示（识别事实），但不进历史/LLM
             ctrl.hard_stop()               # 清理在途 LLM/TTS（已 commit 历史保留）
             _say(wake.go_sleep("bye"))     # 告别语回休眠（不入历史）
+            con.status("休眠中，随时唤醒我哦~")   # 与静默超时一致：回休眠有可见反馈
             return
         ctrl.feed_asr_sentence(r)
 
@@ -450,6 +458,10 @@ def main():
         decision = wake.feed_decision(now, rms2, SPEECH_POW, busy)
         if decision == "none":                     # 静默超时 → 已回休眠
             ctrl.hard_stop()                       # 清理在途 LLM/TTS（已 commit 历史保留）
+            # 告别语是 feed_decision 内部 go_sleep 暂存的，必须取走播放——
+            # 否则超时回休眠全程无声无提示，用户以为没休眠。
+            _say(wake.consume_farewell())
+            con.status("休眠中，随时唤醒我哦~")
             return
         if decision == "kws_only":
             # 自播语音（就绪语/告别语）回声门控：只喂"停下"，自播语音不进识别——否则

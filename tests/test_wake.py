@@ -11,6 +11,7 @@
   6   busy（AI 播放）期不判超时；inactive_timeout=0 永不超时
   7   note_partial：对话期刷新计时；休眠期忽略
   8   sherpa 关键词文件按词集哈希唯一（打断词/唤醒词共存不互覆）
+  9   静默超时告别语：feed_decision 超时回休眠后 consume_farewell 可取走播放（幂等）
 """
 import os
 import sys
@@ -123,5 +124,16 @@ f2 = os.path.basename(d2._keywords_file)
 assert f1 != f2, "不同词集应各占独立 keywords 文件: %r vs %r" % (f1, f2)
 assert "keywords_" in f1 and f1.endswith(".txt"), f1
 print("测试8 关键词文件唯一 OK: %r ≠ %r（打断/唤醒共存不互覆）" % (f1, f2))
+
+# ---- 9. 静默超时告别语：feed_decision 超时后 consume_farewell 可取走 ----
+w = WakeSession(wake_enabled=False, inactive_timeout=60)
+w.last_activity = 0.0
+assert w.feed_decision(100.0, QUIET, POW, False) == "none", "超时→none"
+assert w.state == SLEEP
+assert w.consume_farewell() == FAREWELL_TIMEOUT, "超时告别语应可取走播放"
+assert w.consume_farewell() is None, "取走即清空（幂等）"
+w2 = WakeSession(wake_enabled=False, inactive_timeout=60)
+assert w2.consume_farewell() is None, "从未休眠→无待播告别语→None"
+print("测试9 超时告别语 OK: 超时回休眠后告别语可取走播放，无待播幂等 None")
 
 print("\n全部通过 ✔")

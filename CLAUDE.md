@@ -102,8 +102,10 @@ voice0 的参数在 voice1 的 CLI 上透传，如 `--tts-normalize` rms/agc 响
   `--inactive-timeout`（默认 60s）无用户语音 → 回休眠。**就绪/告别语走直连 `tts.submit`
   （不经 controller → 不入历史），其 Job 作"自播回声"门控**——自播期只喂"停下"，否则
   "在的，我在听"会被识别成用户的话再提交一轮。唤醒 KWS 跑在 MicAGC 后（上限 8x），远距离
-  也能命中；`--wake-word ""` 关闭状态机（启动即对话旧行为）。历史跨休眠保留（同次运行
-  不清空，重启才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。详见
+  也能命中；`--wake-word ""` 关闭状态机（启动即对话旧行为），且**无唤醒检测器 → 永不自动
+  休眠**（休眠后无唤醒途径=死机）。静默超时告别语经 `wake.consume_farewell()` 由调用方播
+  （feed_decision 内部 go_sleep 的返回传不回调用方）。历史跨休眠保留（同次运行不清空，重启
+  才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。详见
   `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」。
 - **回声半双工门控（v1）**：TTS 播放期（`ctrl.tts_busy`）mic 只喂 `asr.ingest_kws_only()`
   （只听"停下"，回声不进识别 → 无反馈自答）；`--no-echo-gate` 关（耳机近场可用）。

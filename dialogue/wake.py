@@ -2,11 +2,13 @@
 """休眠/对话两态会话状态机（唤醒功能）。纯逻辑、不碰硬件。
 
 voice_dialogue.py 用注入的方式驱动它：mic 回调每块喂 `feed_decision`，
-唤醒词命中调 `on_wake`、退出词/静默超时调 `go_sleep`，返回的
+唤醒词命中调 `on_wake`、退出词调 `go_sleep("bye")`，返回的
 就绪语/告别语由调用方**直连 `tts.submit` 播放**（不经 DialogueController，
 所以它们不进对话历史/LLM）；播放 Job 记进 `self_talk`，mic 回调据此把
 自播语音当"自播回声"门控——只喂打断词 KWS，防"在的，我在听"被识别成
-用户的话又提交一轮。
+用户的话又提交一轮。静默超时由 `feed_decision` **内部**调 `go_sleep("timeout")`
+触发（返回值传不回调用方），告别语暂存进 `_farewell`，调用方收到
+`"none"` 后用 `consume_farewell()` 取走播放——否则超时回休眠全程无声无提示。
 
 设计决策（用户拍板）：
 - 启动默认休眠（有唤醒词时），无唤醒词 → 启动即对话（旧行为）。
@@ -40,6 +42,7 @@ class WakeSession:
         self.last_activity = time.monotonic()            # 最近用户语音时刻（静默超时用）
         self.self_talk = None                            # 就绪语/告别语 Job（自播回声门控）
         self.inactive_timeout = inactive_timeout
+        self._farewell = None                            # 待播告别语（静默超时路径暂存）
 
     @property
     def sleeping(self):
@@ -56,11 +59,19 @@ class WakeSession:
 
     def go_sleep(self, reason="timeout"):
         """对话 → 休眠；返回要播的告别语（调用方 tts.submit 后 set_self_talk）。
-        已休眠 → None（幂等）。reason: "bye"（用户说退出词）| "timeout"（静默超时）。"""
+        已休眠 → None（幂等）。reason: "bye"（用户说退出词）| "timeout"（静默超时）。
+        告别语同时暂存进 `_farewell`：静默超时由 feed_decision 内部调用本方法，
+        返回值传不回调用方，调用方收到 "none" 后用 `consume_farewell()` 取走播放。"""
         if self.state == SLEEP:
             return None
         self.state = SLEEP
-        return FAREWELL_BYE if reason == "bye" else FAREWELL_TIMEOUT
+        self._farewell = FAREWELL_BYE if reason == "bye" else FAREWELL_TIMEOUT
+        return self._farewell
+
+    def consume_farewell(self):
+        """取走暂存的待播告别语并清空（幂等：无待播 → None）。"""
+        f, self._farewell = self._farewell, None
+        return f
 
     def set_self_talk(self, job):
         self.self_talk = job
