@@ -1,6 +1,6 @@
 # 语音对话程序（voice_dialogue.py）—— 快速开始 + 参数 + 架构
 
-麦克风 → voice1 ASR → DeepSeek LLM → voice0 TTS 的实时语音对话（单进程非阻塞编排）。
+麦克风 → voice1 ASR → LLM（在线 DeepSeek 或本地 llmx）→ voice0 TTS 的实时语音对话（单进程非阻塞编排）。
 本文讲三件事：**怎么跑**、**每个参数是什么意思**、**背后怎么工作**（线程/时序）。
 所有参数都可用 `python examples/voice_dialogue.py --help` 查看。
 
@@ -8,8 +8,21 @@
 
 **前提**：
 - conda 环境 `voice-asr`（与 voice0 共享，Python 3.10 + torch + melo）。
-- DeepSeek API key 写进 `dialogue/config.local.json`（已 gitignore，**绝不提交**），
-  或设环境变量 `DEEPSEEK_API_KEY`。
+- LLM 二选一，`dialogue/config.local.json`（已 gitignore，**绝不提交**）三字段决定引擎：
+  - **在线 DeepSeek**（默认）——`api_key` 填真 key，或设环境变量 `DEEPSEEK_API_KEY` 兜底：
+
+    ```json
+    { "api_key": "sk-…", "base_url": "https://api.deepseek.com", "model": "deepseek-chat" }
+    ```
+
+  - **本地 llmx**（离线）——先起 llmx server（llmx 项目根下 `run_server.bat`，见 llmx `docs/usage.md`），
+    `api_key` 仅需非空填 `"local"` 即可：
+
+    ```json
+    { "api_key": "local", "base_url": "http://127.0.0.1:8000/v1", "model": "Qwen3-4B-Q4_K_M" }
+    ```
+
+  - 更多引擎（通义/智谱/自写客户端等）见 `docs/EXTENDING-BACKENDS.md`。
 - 中文输出必须加 `PYTHONIOENCODING=utf-8`（Windows GBK 终端会乱码/报错）。
 
 **推荐启动**（GPU 机器）：
