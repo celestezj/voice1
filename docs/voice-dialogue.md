@@ -181,7 +181,7 @@ stateDiagram-v2
 
 ```bash
 conda activate voice-asr
-PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue/user_prompt.txt
+PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue/user_prompt.txt --tts-normalize agc
 ```
 
 - `--vad-threshold-db -42`：门槛比默认 -35 低 7dB ≈ 约 2.2 倍距离余量；代价是环境噪声更易
