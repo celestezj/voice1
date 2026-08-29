@@ -59,17 +59,21 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, r"E:\temp\voice0")    # voice0（只读引用，不改它任何文件）
+_PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))     # voice1 仓库根
+# voice0（只读引用，不改它任何文件）：约定放在 voice1 的**同级目录**（不是机器专属
+# 绝对路径，任何机器上把 voice0 克隆到 voice1 旁边即可；setup_env.py 自动做）。
+_VOICE0 = os.path.join(os.path.dirname(_PROJ), "voice0")
+
+sys.path.insert(0, _PROJ)
+sys.path.insert(0, _VOICE0)
 
 # 缓存/镜像重定向（必须在 import asr/tts 之前）：voice0 权重全在 voice0/.cache，
 # 若走默认 HF 缓存会漏 checkpoint.pth 从 hf-mirror 重下 208M（2026-08-29 实测卡 46 分钟）。
 # HF_HUB_DISABLE_XET：MeloTTS-Chinese 已被切成 Xet 存储，新版 huggingface_hub 会把
 # xet 仓库当"未缓存"绕开本地权重直接重下——禁用后正常命中缓存（0.55s 返回）。
-os.environ["MODELSCOPE_CACHE"] = os.path.join(           # voice1 paraformer 权重
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache", "modelscope")
-os.environ["HF_HOME"] = r"E:\temp\voice0\.cache\hf"      # voice0 melo/BERT 权重
-os.environ["NLTK_DATA"] = r"E:\temp\voice0\.cache\nltk_data"   # melo g2p 语料
+os.environ["MODELSCOPE_CACHE"] = os.path.join(_PROJ, ".cache", "modelscope")   # voice1 paraformer 权重
+os.environ["HF_HOME"] = os.path.join(_VOICE0, ".cache", "hf")          # voice0 melo/BERT 权重
+os.environ["NLTK_DATA"] = os.path.join(_VOICE0, ".cache", "nltk_data") # melo g2p 语料
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"      # 首次下载走镜像
 os.environ["HF_HUB_DISABLE_XET"] = "1"                   # 见上：xet 仓库会绕开缓存重下
 # 离线模式（权重全在 HF_HOME 缓存，纯离线程序）：transformers 加载 tokenizer 时

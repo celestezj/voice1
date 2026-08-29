@@ -7,20 +7,25 @@
 
 ## 快速上手（从零复现）
 
+> **依赖前置**：voice1 的语音对话程序（`examples/voice_dialogue.py`）在同一进程里同时跑
+> voice1 的 ASR 和 **voice0** 的 TTS。voice0 约定放在 voice1 的**同级目录**（安装脚本会自动
+> 克隆到那里）——环境装的是 **voice0/voice1 共用的唯一环境 `voice-asr`**（TTS 底座复用
+> voice0 的 `voice-tts` 克隆而来）。
+
 ```bash
-# 1) 环境：克隆 voice0 的 voice-tts（含 torch），独立名 voice-asr
-conda create -n voice-asr --clone voice-tts
+# 0) 前置：安装 Miniconda/Anaconda + Git for Windows（git 需在 PATH）
+
+# 1) 一键安装（自动检测显卡→建 voice-tts 底座→克隆出共享环境 voice-asr→
+#    装 ASR 依赖→预下载权重→端到端验证；重复执行自动跳过已完成步骤）
+python setup_env.py
+
+# 2) 用共享环境（voice0 / voice1 都用它）
 conda activate voice-asr
 
-# 2) 权重预下载（仅首次联网；之后运行期零网络）
-python preload_asr.py
-
-# 3) 跑验收（CER/RTF/尾字延迟，CPU/GPU 双测）
-python bench/bench_asr.py --backend paraformer --device cuda --tag my
-
-# 4) 跑起来（中文输出加 PYTHONIOENCODING=utf-8）
+# 3) 跑起来（中文输出加 PYTHONIOENCODING=utf-8）
 python examples/transcribe_file.py 音频.wav --device cuda [--streaming]   # 文件转写（wav/mp3/flac/ogg；--streaming 流式逐块出字）
 python examples/record_mic.py --device cuda                  # 麦克风实时识别（无麦克风自动检测提示；--input-device 可指定设备；--streaming 流式逐块出字）
+python bench/bench_asr.py --backend paraformer --device cuda --tag my     # 验收（CER/RTF/尾字延迟）
 ```
 
 - 完整环境版本与镜像源：见 [`docs/environment-voice1.md`](docs/environment-voice1.md)。

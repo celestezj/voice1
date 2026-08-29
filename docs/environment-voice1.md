@@ -21,12 +21,16 @@
 
 ## 从零复现
 
+> **一键安装**：`python setup_env.py`（仓库根）自动完成下面 1-3 步 + 端到端验证——
+> 复用 voice0 一键脚本建 voice-tts 底座，克隆出 **voice0/voice1 共用的唯一环境 voice-asr**，
+> 装 ASR 依赖、预下载权重。下面命令行仅为手动分解，正常直接用脚本即可。
+
 ```bash
-# 1) 克隆环境（节省 torch 重下载；版本冲突可单独重装）
-conda create -n voice-asr --clone voice-tts
+# 1) 一键安装（推荐）
+python setup_env.py
 conda activate voice-asr
 
-# 2) 权重预下载（仅首次联网，之后运行期零网络）
+# 2) 权重预下载（脚本已做；仅首次联网，之后运行期零网络）
 python preload_asr.py
 
 # 3) 跑验收

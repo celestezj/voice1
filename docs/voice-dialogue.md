@@ -245,7 +245,7 @@ t+4300+    只听"停下"（回声到了，防止 AI 回答自己的回声）
 
 **为什么是时间窗，不能精确到"音频开播那一瞬间"**：
 先分清"内部知道"和"对外暴露"。voice0 **内部知道**开播时刻——播放线程每取一块、首次写
-声卡前打点（`E:\temp\voice0\tts\core\engine.py` `_worker_play` 里 `_play_audio` 的首调用），
+声卡前打点（voice0 的 `tts/core/engine.py` `_worker_play` 里 `_play_audio` 的首调用），
 `--profile` 时还记进逐句 `play_start`。但**对外不暴露**：`Job`（`tts/core/jobs.py`）公开接口
 只有 `done`（整个任务**播完**或被打断才置位）、`wait()`、`canceled`、`timing`（仅 profile
 开时才有、是内部基准结构而非 API 契约），**没有"已开始播放"的事件信号**。所以"音频从喇叭

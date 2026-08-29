@@ -24,7 +24,8 @@ import os
 import sys
 
 _PROJ1 = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # voice1
-_PROJ0 = r"E:\temp\voice0"                                               # voice0（只读引用，不改它任何文件）
+# voice0（只读引用，不改它任何文件）：约定放在 voice1 的**同级目录**（setup_env.py 自动克隆）
+_PROJ0 = os.path.join(os.path.dirname(_PROJ1), "voice0")
 
 # ── 在 import 两个项目之前播种缓存环境变量（setdefault 是"先到先得"，这里显式定死）──
 os.environ["MODELSCOPE_CACHE"] = os.path.join(_PROJ1, ".cache", "modelscope")  # voice1 paraformer 权重
