@@ -73,7 +73,7 @@
 不在这里改；本程序把 voice0 路径塞进 `sys.path` 导入 `from tts import RealtimeTTS`）。
 
 - **跑法（推荐）**（中文输出必须 `PYTHONIOENCODING=utf-8`）：
-  `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300`
+  `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --system-prompt dialogue/user_prompt.txt`
   （`--vad-tail 300` 比默认 600 每轮首包快 300ms；残句由 post-commit barge 兜底，停顿多
   就调回 600）
 - **参数含义白话版 + 快速开始 + 架构时序图**（vad-tail / post-commit-window / echo-guard /

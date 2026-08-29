@@ -16,7 +16,7 @@
 
 ```bash
 conda activate voice-asr
-PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300
+PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --system-prompt dialogue/user_prompt.txt
 ```
 
 - `--asr-device cuda`：ASR（paraformer）跑 GPU；无 GPU 换 `cpu`（实时性差些）。
@@ -25,6 +25,9 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
   代价是组织语言停顿 >300ms 时句子会被提前判定"说完"（残句）——残句由 post-commit
   barge 零延迟兜底：续句定稿在窗口内 → 撤答复合并重答；窗口外 → 变独立一轮（尾巴不丢）。
   你说话停顿多、很在意"不拆句"就调回 `--vad-tail 600`（默认）。
+- `--system-prompt dialogue/user_prompt.txt`：指定系统提示词文件（角色设定）。这里用项目
+  里的 `dialogue/user_prompt.txt`（已 gitignore，内容自己编辑）；不用可去掉该参数，详见
+  「自定义系统提示词」。
 - 打断词默认「停下」，回声门控默认开（半双工）。
 - 唤醒默认开（`--wake-word` 默认"小爱小爱"）：启动即休眠，说唤醒词才进对话，详见
   「休眠 / 唤醒 / 退出」。要恢复"启动即对话"旧行为：`--wake-word ""`。
@@ -175,7 +178,7 @@ stateDiagram-v2
 
 ```bash
 conda activate voice-asr
-PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42
+PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue/user_prompt.txt
 ```
 
 - `--vad-threshold-db -42`：门槛比默认 -35 低 7dB ≈ 约 2.2 倍距离余量；代价是环境噪声更易
