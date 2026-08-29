@@ -94,6 +94,16 @@
 - **停用词"停下"**：`--interrupt-words`（默认"停下"）。KWS 旁路命中 → `interrupt()` →
   `on_interrupt` 回调 → 控制器 `hard_stop()`：立即终止 LLM 流与 TTS 输出；**被打断的问题
   保留进历史**，"停下"本身经 KWS 旁路吞掉、绝不进历史/LLM 输入。
+- **休眠/唤醒/退出状态机**（`--wake-word` 默认"小爱小爱"，逗号多词）：启动默认休眠——
+  mic 只喂唤醒词 KWS（`dialogue/wake.py` `WakeSession` 两态），其余一律不喂 ASR（说什么
+  都不识别/不提交）。命中唤醒词 → 对话 + 播就绪语"在的，我在听"。退出词（`--exit-words`
+  默认"拜拜"）在 `on_sentence` 入口拦截（照常显示但不进历史/LLM）；静默超时
+  `--inactive-timeout`（默认 60s）无用户语音 → 回休眠。**就绪/告别语走直连 `tts.submit`
+  （不经 controller → 不入历史），其 Job 作"自播回声"门控**——自播期只喂"停下"，否则
+  "在的，我在听"会被识别成用户的话再提交一轮。唤醒 KWS 跑在 MicAGC 后（上限 8x），远距离
+  也能命中；`--wake-word ""` 关闭状态机（启动即对话旧行为）。历史跨休眠保留（同次运行
+  不清空，重启才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。详见
+  `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」。
 - **回声半双工门控（v1）**：TTS 播放期（`ctrl.tts_busy`）mic 只喂 `asr.ingest_kws_only()`
   （只听"停下"，回声不进识别 → 无反馈自答）；`--no-echo-gate` 关（耳机近场可用）。
   忙碌跟踪靠 voice0 `Job.done` + 守护 watcher 线程（voice0 无播放回调且不可改）。
@@ -130,8 +140,10 @@
   `× LLM 出错`=流抛异常（`on_llm_error`）；`[门控]`=回声门控转换提示
   （AI 播放期 mic 只听"停下"，此刻说话不被识别——离远/音量低时 VAD 不闭句，句子
   "悬在流式 cache"永远不定稿，正是`… `行无后续的成因）。
-- headless 测试：`tmp/test_dialogue.py`（gitignored）——fake LLM/TTS 覆盖切句/barge-in/
-  hold-off/hard_stop/busy/压缩/引擎钩子（`RealtimeASR.__new__` 绕过模型加载）。
+- headless 测试：`tests/test_wake.py`（**已入库**）——WakeSession 状态机 + sherpa 关键词
+  文件唯一化（唤醒/退出/超时/自播门控/幂等）；`tmp/test_dialogue.py`（gitignored）——fake
+  LLM/TTS 覆盖切句/barge-in/hold-off/hard_stop/busy/压缩/引擎钩子（`RealtimeASR.__new__`
+  绕过模型加载）。都用 `D:/anaconda/envs/voice-asr/python.exe` 跑。
 
 ## 代码结构
 
@@ -150,7 +162,8 @@ asr/
 └── sherpa/      SherpaBackend（CPU 轻量基线，sherpa-onnx zipformer）
 dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + compress）/
                  controller.py（DialogueController：barge-in/hard_stop/tts_busy/hold-off/历史压缩）/
-                 mic.py（MicAGC/check_mic_signal/pick_input_device）
+                 mic.py（MicAGC/check_mic_signal/pick_input_device）/
+                 wake.py（WakeSession：休眠/对话两态状态机，唤醒/退出/静默超时，纯逻辑可测）
                  config.local.json（机密 API key，gitignored，绝不提交）
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）
 examples/        transcribe_file / record_mic / demonstrate_interrupt（T12）/ demonstrate_streaming（T13）/
