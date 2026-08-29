@@ -99,11 +99,15 @@ class SherpaKwsDetector(InterruptDetector):
     def _ensure_keywords_file(self):
         """汉字词集 → 拼音音节串（KWS 建模单元），每次 load 重写（词集可随配置变化）。
 
+        文件名按词集哈希区分——同进程可共存多个检测器（打断词 / 唤醒词等），
+        各自 keywords 文件互不覆盖（否则后加载的检测器会覆写同一 keywords.txt）。
         转换用 `_word_to_tokens`（pypinyin 拆声母+韵母，组合声母不拆开，
         与 tokens.txt 建模单元一致）。依赖 pypinyin（缺失在 load 抛错→引擎降级）。
         """
+        import hashlib
         os.makedirs(self._cache_dir(), exist_ok=True)
-        path = os.path.join(self._cache_dir(), "keywords.txt")
+        key = hashlib.md5("|".join(self._words).encode("utf-8")).hexdigest()[:8]
+        path = os.path.join(self._cache_dir(), "keywords_%s.txt" % key)
         with open(path, "w", encoding="utf-8") as f:
             for w in self._words:
                 flat = " ".join(_word_to_tokens(w))

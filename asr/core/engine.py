@@ -39,12 +39,13 @@ class RealtimeASR:
     _init_lock = threading.Lock()
 
     def __new__(cls, backend="paraformer", device="auto", sample_rate=16000,
-                vad_silence_tail_ms=250, profile=False, debug=False,
-                interrupt_words=None, streaming=False, hotword_file=None):
-        # 单例：backend/device/vad_tail/interrupt_words/streaming/hotword_file 任一变更 → 销毁重建
+                vad_silence_tail_ms=250, vad_threshold_db=-35.0, profile=False,
+                debug=False, interrupt_words=None, streaming=False, hotword_file=None):
+        # 单例：backend/device/vad_tail/vad_threshold/interrupt_words/streaming/hotword_file 任一变更 → 销毁重建
         inst = cls._instance
         if inst is not None and (inst._backend_name != backend or inst._device != device
                                  or inst._vad_tail_ms != vad_silence_tail_ms
+                                 or inst._vad_threshold_db != vad_threshold_db
                                  or inst._interrupt_words != list(interrupt_words or [])
                                  or inst._streaming != bool(streaming)
                                  or inst._hotword_file != hotword_file):
@@ -55,14 +56,15 @@ class RealtimeASR:
         return cls._instance
 
     def __init__(self, backend="paraformer", device="auto", sample_rate=16000,
-                 vad_silence_tail_ms=250, profile=False, debug=False,
-                 interrupt_words=None, streaming=False, hotword_file=None):
+                 vad_silence_tail_ms=250, vad_threshold_db=-35.0, profile=False,
+                 debug=False, interrupt_words=None, streaming=False, hotword_file=None):
         if getattr(self, "_inited", False):
             return
         self._backend_name = backend or "paraformer"
         self._device = device or "auto"
         self._sr = int(sample_rate)
         self._vad_tail_ms = vad_silence_tail_ms
+        self._vad_threshold_db = float(vad_threshold_db)
         self._profile = profile
         self._debug = debug
         self._interrupt_words = list(interrupt_words) if interrupt_words else []
@@ -109,7 +111,8 @@ class RealtimeASR:
             print("[RealtimeASR] 后端 %s 不支持流式，streaming=True 降级为整句识别"
                   % self._backend_name, flush=True)
 
-        self._vad = EnergyVAD(sample_rate=self._sr, silence_tail_ms=vad_silence_tail_ms)
+        self._vad = EnergyVAD(sample_rate=self._sr, silence_tail_ms=vad_silence_tail_ms,
+                              threshold_db=vad_threshold_db)
         self._audio_q = queue.Queue(maxsize=8)     # 有界背压
         self._recog_lock = threading.Lock()        # 模型非线程安全
         self._state_lock = threading.RLock()       # VAD/句子索引等状态（RLock：worker 持锁时 interrupt 内部可重入）

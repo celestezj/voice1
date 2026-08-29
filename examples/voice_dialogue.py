@@ -27,6 +27,17 @@ KWS-only、句子悬成 partial 被吞）；回声一到由 `--echo-guard` 硬�
 post-commit barge 已接管续句打断，hold 只保护首句边界后 0.35s 内续句的极窄窗口，代价是
 每轮首包音频固定 +0.35s——不划算，故默认 0。
 
+休眠/对话状态机（`--wake-word`，默认开）：
+    程序启动默认休眠（SLEEP）：mic 只喂唤醒词 KWS，其余一律不喂 ASR → 说什么都不识别。
+    命中唤醒词 → 进对话（ACTIVE），播就绪语"在的，我在听"；唤醒词、就绪语、告别语都
+    **不入对话历史/LLM**（就绪语、告别语走直连 tts.submit，不经 controller）。
+    对话期保持原"麦克风→ASR→LLM→TTS"全链路（含回声门控/打断/post-commit barge）。
+    结束有两个途径：(a) 说退出词（默认"拜拜"，仅 AI 沉默时可说——AI 播放期只喂"停下"
+    听不到它）→ 播"好的，我先退下啦…"回休眠；(b) 静默超时 `--inactive-timeout` 默认
+    60s 无用户语音 → 播"一直不说话，我先退下啦…"回休眠。唤醒/退出词都逗号分隔多词。
+    `--wake-word ""` 关闭状态机 → 启动即对话（旧行为）。对话历史跨休眠保留：同一次
+    程序运行内休眠不清历史，只有程序重启才重建本地 session 存档。
+
 拆句根治（零固定延迟）：残句定稿立即发 LLM（无合并延迟）；AI 已答完、但音频还没开播
 （`--post-commit-window` 默认 1500ms，≈melo 首句合成延迟）时用户补句 → 控制器撤下刚
 答的残句答复、残句+新句连同历史重发。音频已开播后的续句才是新轮。
@@ -66,6 +77,7 @@ from asr import RealtimeASR              # noqa: E402  voice1
 from tts import RealtimeTTS              # noqa: E402  voice0
 from dialogue import DialogueController, OpenAICompatibleClient  # noqa: E402
 from dialogue.mic import MicAGC, check_mic_signal, pick_input_device  # noqa: E402
+from dialogue.wake import WakeSession, ACTIVE          # noqa: E402  休眠/对话状态机
 from asr.core.audio import resample_to   # noqa: E402
 
 SR = 16000
@@ -203,6 +215,19 @@ def main():
     ap.add_argument("--echo-gate", action=argparse.BooleanOptionalAction, default=True,
                     help="回声门控：TTS 播放期只喂\"停下\"KWS、不识别（默认开；"
                          "--no-echo-gate 播放期可正常打断但接受回声，适合耳机）")
+    ap.add_argument("--wake-word", default="小爱小爱",
+                    help="唤醒词（逗号分隔，默认\"小爱小爱\"）：休眠期只听这些词，命中才进入"
+                         "对话。传空串（--wake-word \"\"）关闭唤醒 → 启动即对话（旧行为）")
+    ap.add_argument("--exit-words", default="拜拜",
+                    help="退出词（逗号分隔，默认\"拜拜\"）：对话期听到该词即播告别语并回休眠，"
+                         "退出词本身不入对话历史。仅 AI 沉默时生效（AI 播放期只喂\"停下\"）")
+    ap.add_argument("--inactive-timeout", type=int, default=60,
+                    help="静默超时秒（默认 60）：对话期无用户语音持续这么久 → 播告别语并回休眠"
+                         "（告别语不入历史）。0=关闭自动休眠")
+    ap.add_argument("--vad-threshold-db", type=float, default=-35.0,
+                    help="VAD 断句能量门槛 dB（默认 -35）：离麦克风远说话够不着门槛就不定稿"
+                         "提交（只有 partial 不出字）。调低（如 -42）提升灵敏度，但环境噪声"
+                         "更易误断句；配合 MicAGC 上限 8x 增益使用")
     ap.add_argument("--max-context-tokens", type=int, default=40000,
                     help="上下文 token 预算：超阈值触发历史压缩（默认 40000）")
     ap.add_argument("--max-history", type=int, default=0,
@@ -250,8 +275,11 @@ def main():
 
     # ---- 引擎 ----
     interrupt_words = [w.strip() for w in args.interrupt_words.split(",") if w.strip()] or None
+    wake_words = [w.strip() for w in args.wake_word.split(",") if w.strip()] or None
+    exit_words = [w.strip() for w in args.exit_words.split(",") if w.strip()] or None
     asr = RealtimeASR(backend="paraformer", device=args.asr_device, streaming=args.streaming,
                       vad_silence_tail_ms=args.vad_tail,   # 默认 600ms：别在句中停顿处拆句
+                      vad_threshold_db=args.vad_threshold_db,   # 默认 -35dB：调低提升远距离灵敏度
                       profile=True, hotword_file=args.hotword_file, debug=args.debug,
                       interrupt_words=interrupt_words)
     tts = RealtimeTTS(device=args.tts_device, backend="melo", mode="queue",
@@ -267,7 +295,33 @@ def main():
     con = _Console()
     asr_last = [""]
 
+    # ---- 休眠/对话状态机（唤醒功能）----
+    wake = WakeSession(wake_enabled=bool(wake_words), inactive_timeout=args.inactive_timeout)
+    wake_det = None
+    if wake_words:
+        try:
+            from asr.kws.interrupt import get_interrupt_detector
+            wake_det = get_interrupt_detector("sherpa", words=wake_words)
+            wake_det.load()
+            print("[唤醒] 唤醒词就绪：%s（启动即休眠，命中才对话）" % wake_words, flush=True)
+        except Exception as e:
+            print("[唤醒] 唤醒词检测加载失败（唤醒关闭，启动即对话）：%s" % e, flush=True)
+            wake_det = None
+            wake.state = ACTIVE              # 无唤醒检测器 → 不能休眠，直接对话
+
+    def _say(text):
+        """播就绪语/告别语（直连 TTS，不经 controller → 不入历史/LLM）。Job 记入
+        wake.self_talk，mic 回调把它当"自播回声"门控——"在的，我在听"不会被识别成
+        你说的话再提交一轮。"""
+        if text is None:
+            return
+        try:
+            wake.set_self_talk(tts.submit(text))
+        except Exception as e:
+            print("[自播] 语音播放失败：%s" % e, flush=True)
+
     def on_partial(p):
+        wake.note_partial()                        # 有语音出字 → 用户在说话（任意距离都算）
         if p.text and p.text != asr_last[0]:
             asr_last[0] = p.text
             # "… "前缀 = 仍在出字、未定稿（不会提交）；定稿后 on_user 的时间戳覆盖它
@@ -295,7 +349,19 @@ def main():
         con.status("[合并] 撤回了刚才的答复，正在重答完整问题…")
 
     asr.on_partial(on_partial)
-    asr.on_sentence(lambda r: ctrl.feed_asr_sentence(r))
+
+    def on_sentence(r):
+        # 定稿句统一入口：休眠期防御返回；退出词拦截（不入历史/LLM）；其余正常提交。
+        if wake.sleeping:                  # 休眠期不应有定稿句（没喂 ASR）——防御
+            return
+        if exit_words and any(w in r.text for w in exit_words):
+            on_user(r)                     # 退出词照常显示（识别事实），但不进历史/LLM
+            ctrl.hard_stop()               # 清理在途 LLM/TTS（已 commit 历史保留）
+            _say(wake.go_sleep("bye"))     # 告别语回休眠（不入历史）
+            return
+        ctrl.feed_asr_sentence(r)
+
+    asr.on_sentence(on_sentence)
     asr.on_interrupt(ctrl.hard_stop)                # 用户说"停下"→ 立即终止 LLM+TTS
     ctrl.register_callbacks(on_user=on_user, on_ai_delta=on_ai_delta,
                             on_ai_sentence=on_ai_sentence,
@@ -336,7 +402,10 @@ def main():
         else:
             dump_session(dump_path, ctrl)          # 间隔 0：只退出时写，先建文件占位
 
-    tts.submit("你好，我在听。")                    # 非阻塞：后台播就绪语
+    if wake.sleeping:
+        con.status("休眠中，随时唤醒我哦~")          # 唤醒开：启动即休眠，只说唤醒词才对话
+    else:
+        tts.submit("你好，我在听。")                # 唤醒关（旧行为）：启动即对话
     agc = MicAGC()
 
     gate_on = [False]          # 回声门控状态（跨回调跟踪转换，mic 回调里检测）
@@ -350,10 +419,34 @@ def main():
         mono = np.ascontiguousarray(indata[:, 0], dtype=np.float32)
         if dev_sr != SR:
             mono = resample_to(mono, dev_sr, SR)
-        mono = agc.apply(mono)
+        mono = agc.apply(mono)                     # 先 AGC：唤醒词与远距离说话同灵敏度
         rms2 = float(np.mean(mono * mono)) + 1e-12
-        busy = bool(args.echo_gate and ctrl.tts_busy)
         now = time.monotonic()
+
+        # ---- 休眠：只听唤醒词，其余一律不喂 ASR（说什么都不识别）----
+        if wake.sleeping:
+            if wake_det is not None:
+                try:
+                    if wake_det.feed(mono):
+                        _say(wake.on_wake())       # 就绪语直连 TTS（不入历史/LLM）
+                        con.status("[唤醒] 已唤醒，开始对话")
+                except Exception:
+                    pass                          # 检测器异常不致命，跳过本块
+            return
+
+        # ---- 对话中 ----
+        busy = bool(args.echo_gate and ctrl.tts_busy)
+        decision = wake.feed_decision(now, rms2, SPEECH_POW, busy)
+        if decision == "none":                     # 静默超时 → 已回休眠
+            ctrl.hard_stop()                       # 清理在途 LLM/TTS（已 commit 历史保留）
+            return
+        if decision == "kws_only":
+            # 自播语音（就绪语/告别语）回声门控：只喂"停下"，自播语音不进识别——否则
+            # "在的，我在听"会被当成你说的话提交/入历史。这里不开滚动 grace：grace 会
+            # 把自播回声当"用户尾巴"喂进识别。
+            asr.ingest_kws_only(mono)
+            return
+
         if busy != gate_on[0]:                     # 门控转换 → 状态行，让用户知道何时在听
             gate_on[0] = busy
             gate_since[0] = now if busy else 0.0
@@ -398,6 +491,8 @@ def main():
                 print("已写会话存档：%s" % dump_path, flush=True)
             except Exception as e:
                 print("[存档] 退出写入失败: %s" % e, flush=True)
+        if wake_det is not None:
+            wake_det.close()
         asr.close()
         ctrl.close()
         tts.close()
