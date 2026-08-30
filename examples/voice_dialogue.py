@@ -261,6 +261,10 @@ def main():
                     help="会话存档目录（默认 sessions/，相对当前目录；已 gitignore）")
     ap.add_argument("--history-dump-interval", type=int, default=300,
                     help="会话存档间隔秒（默认 300=5 分钟；0=只退出时写一次）")
+    ap.add_argument("--mood-marker", action=argparse.BooleanOptionalAction, default=True,
+                    help="心态标记【心态：xxx】（默认开）：LLM 回复带的心态标记只在送 TTS 时剥掉"
+                         "不念，正文/历史/存档/控制台保留；--no-mood-marker 关闭后代码行为与未改"
+                         "造一致（此时若 user_prompt.txt 仍要求吐标记，会被 TTS 念出来）")
     args = ap.parse_args()
 
     # ---- 麦克风 ----
@@ -307,7 +311,8 @@ def main():
                               reply_hold=args.reply_hold,
                               merge_window=args.merge_window / 1000.0,
                               post_commit_window=args.post_commit_window / 1000.0,
-                              max_context_tokens=args.max_context_tokens)
+                              max_context_tokens=args.max_context_tokens,
+                              mood_marker=args.mood_marker)
 
     # ---- 控制台 + 回调接线 ----
     con = _Console()
@@ -354,7 +359,7 @@ def main():
                      % (r.audio_start, r.audio_end, r.text))
 
     def on_ai_delta(_delta, full):
-        con.update("ai", "AI: " + full)             # AI 流式：原地刷新
+        con.update("ai", "AI: " + full)             # AI 流式：原地刷新（含【心态：xxx】标记）
 
     def on_ai_sentence(_s):
         con.newline()                               # 这句已送 TTS（开播）→ 换行定稿

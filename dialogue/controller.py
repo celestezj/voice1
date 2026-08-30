@@ -18,6 +18,7 @@
 - 句末合并窗口（`merge_window`，默认关）：断句后等窗口内补句才发 LLM（每轮固定延迟，
   主程序默认 0 不用它，post-commit barge 是其零延迟替代）。
 """
+import re
 import threading
 import time
 
@@ -29,9 +30,20 @@ class DialogueController:
     _HARD_MAX = 40                # 无标点累积超此长度 → 兜底硬切（保首包延迟）
     _COMMA_WINDOW = 12            # 硬切时回找逗号的最大回看长度
 
+    # 心态标记：LLM 回复开头带【心态：xxx】（user_prompt.txt 约定），代表表情、不念出来。
+    # 支持【】与 [] 两种括号；_MOOD_RE 取首个心态（on_mood 回调），_MOOD_SUB 只在送 TTS 时
+    # 剥掉标记不读；标记保留在正文/历史/存档/控制台（它是模型的真实输出，必须带上）。
+    _MOOD_RE  = re.compile(r"[【\[]心态[:：]\s*([^】\]]+)[】\]]")
+    _MOOD_SUB = re.compile(r"[【\[]心态[:：][^】\]]*[】\]]")
+    _MOODS = {"平和", "开心", "兴奋", "惊喜", "温柔", "关切", "好奇", "期待",
+              "无奈", "失望", "沮丧", "难过", "担心", "不满", "生气", "愤怒"}
+
     def __init__(self, llm, tts, *, system_prompt=None, max_history_messages=None,
                  reply_hold=0.0, merge_window=0.0, post_commit_window=0.0,
-                 max_context_tokens=40000, recent_keep=6, headroom=4000):
+                 max_context_tokens=40000, recent_keep=6, headroom=4000,
+                 mood_marker=True):
+        # mood_marker=False → 本类的全部心态逻辑跳过（剥标记/解析/默认心态），
+        # 行为与本次改动前完全一致；是否让 LLM 吐标记由 user_prompt.txt 里的约定决定。
         self._llm = llm
         self._tts = tts
         self._system = system_prompt or (
@@ -67,12 +79,15 @@ class DialogueController:
         self._on_llm_start = None    # LLM 请求已发起（等待首 token，供控制台状态行）
         self._on_llm_error = None    # LLM 流抛异常（供控制台报错行）
         self._on_merge_rollback = None   # post-commit barge 撤答复（供控制台提示）
+        self._mood_marker = bool(mood_marker)   # 心态标记总开关（False=全部跳过，行为同改动前）
+        self._mood = None                # 当前回复解析出的心态（None=尚未解析到标记）
+        self._on_mood = None             # 心态标记解析到（供上层显示/表情映射；正文里标记照常保留）
 
     # ---------------- 回调注册（供主程序/控制台接）----------------
     def register_callbacks(self, on_user=None, on_ai_delta=None,
                            on_ai_sentence=None, on_ai_done=None,
                            on_llm_start=None, on_llm_error=None,
-                           on_merge_rollback=None):
+                           on_merge_rollback=None, on_mood=None):
         self._on_user = on_user
         self._on_ai_delta = on_ai_delta
         self._on_ai_sentence = on_ai_sentence
@@ -80,6 +95,7 @@ class DialogueController:
         self._on_llm_start = on_llm_start
         self._on_llm_error = on_llm_error
         self._on_merge_rollback = on_merge_rollback   # post-commit barge 撤答复（供控制台提示）
+        self._on_mood = on_mood
 
     @property
     def history(self):
@@ -142,6 +158,10 @@ class DialogueController:
     # ---------------- TTS 提交 + 忙碌跟踪（voice0 Job.done，不改 voice0）----------------
     def _submit_tts(self, sentence):
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
+        if self._mood_marker:                          # 心态标记【心态：xxx】只在送 TTS 时剥掉不读
+            sentence = self._MOOD_SUB.sub("", sentence)
+            if not sentence:
+                return                                # 纯标记残句剥完为空 → 无需播
         job = self._tts.submit(sentence)
         with self._lock:
             if self._turn_first_submit_ts is None:
@@ -285,6 +305,8 @@ class DialogueController:
                 return                 # 防御：不应有在途流（feed 已置 None）
             self._merge_deadline = None
             self._turn_first_submit_ts = None  # 新一轮：首句提交时刻锚点重置
+            if self._mood_marker:
+                self._mood = None              # 新一轮：心态标记重新解析
             gen = self._gen
             messages = self._build_messages_locked()   # system(+摘要)+历史+最新用户问题
         t = threading.Thread(target=self._llm_loop, args=(gen, messages),
@@ -329,6 +351,8 @@ class DialogueController:
                         return
                     self._assistant_buf += delta
                     self._assistant_full += delta
+                    if self._mood_marker:
+                        self._parse_mood_locked()
                     buf = self._assistant_buf
                 if self._on_ai_delta:
                     self._on_ai_delta(delta, buf)
@@ -350,12 +374,14 @@ class DialogueController:
             with self._lock:
                 if gen != self._gen:
                     return
-                full = self._assistant_full        # 完整回复（用于 commit/回调）
+                full = self._assistant_full        # 完整回复（保留心态标记：进历史/回调，TTS 才剥）
                 tail = self._assistant_buf.strip()  # 未切句的残句也要播出来
                 if tail:
                     self._submit_tts(tail)
                 self._assistant_buf = ""
                 self._assistant_full = ""
+                if self._mood_marker and self._mood is None:
+                    self._mood = "平和"            # LLM 没带标记 → 默认心态
                 self._commit_locked(full)
                 self._stream_thread = None
             if self._on_ai_sentence and tail:
@@ -368,13 +394,32 @@ class DialogueController:
         """完整回复才进历史（被打断的回复 gen 不对，根本到不了这里）。调用方持锁。"""
         if self._user_turn:
             self._history.append({"role": "user", "content": self._user_turn})
-        t = full_text.strip()
+        t = full_text.strip()    # 心态标记是模型真实输出，保留在历史/存档/上下文里
         if t:
             self._history.append({"role": "assistant", "content": t})
         self._user_turn = ""
         # 历史长度由 token 预算（_maybe_compress）管理；_max_history 仅作硬安全上限
         if self._max_history and len(self._history) > self._max_history:
             self._history = self._history[len(self._history) - self._max_history:]
+
+    # ---------------- 心态标记（user_prompt 约定的【心态：xxx】：保留在正文，仅送 TTS 时剥掉不读）----------------
+    def _parse_mood_locked(self):
+        """从流式文本里解析心态标记。调用方持锁。
+
+        标记**保留**在 _assistant_buf/_assistant_full 里（它是模型的真实输出：控制台打印、
+        历史存档、LLM 上下文都要带上），只在 `_submit_tts` 送 TTS 那一刻被 _MOOD_SUB 剥掉。
+        标记是流式逐 token 到达、可能被切开（如「【心态」「：」「开心】」），因此每 delta
+        都对累计文本重试：_MOOD_RE 取首个心态记录（on_mood 回调，供上层显示/表情映射）。
+        LLM 没带标记 → _mood 保持 None，流末 finally 兜底为「平和」。
+        """
+        if self._mood is not None:
+            return
+        m = self._MOOD_RE.search(self._assistant_full)
+        if m:
+            mood = (m.group(1) or "").strip()
+            self._mood = mood if mood in self._MOODS else "平和"   # 超纲词兜底
+            if self._on_mood:
+                self._on_mood(self._mood)
 
     # ---------------- 切句 → TTS ----------------
     def _emit_sentences(self, gen):
