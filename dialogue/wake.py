@@ -36,13 +36,14 @@ class WakeSession:
     线程写、mic 回调读——同一 Job 对象，`.done` 是 threading.Event 查询。
     """
 
-    def __init__(self, wake_enabled=True, inactive_timeout=60):
+    def __init__(self, wake_enabled=True, inactive_timeout=60, on_sleep=None):
         self.wake_enabled = bool(wake_enabled)
         self.state = SLEEP if wake_enabled else ACTIVE   # 无唤醒词 → 启动即对话
         self.last_activity = time.monotonic()            # 最近用户语音时刻（静默超时用）
         self.self_talk = None                            # 就绪语/告别语 Job（自播回声门控）
         self.inactive_timeout = inactive_timeout
         self._farewell = None                            # 待播告别语（静默超时路径暂存）
+        self.on_sleep = on_sleep                         # 可选：进入休眠回调(reason)，调用方注入
 
     @property
     def sleeping(self):
@@ -61,10 +62,17 @@ class WakeSession:
         """对话 → 休眠；返回要播的告别语（调用方 tts.submit 后 set_self_talk）。
         已休眠 → None（幂等）。reason: "bye"（用户说退出词）| "timeout"（静默超时）。
         告别语同时暂存进 `_farewell`：静默超时由 feed_decision 内部调用本方法，
-        返回值传不回调用方，调用方收到 "none" 后用 `consume_farewell()` 取走播放。"""
+        返回值传不回调用方，调用方收到 "none" 后用 `consume_farewell()` 取走播放。
+        `on_sleep` 回调（若注入）在进入休眠后同步触发——bye/timeout 两条回休眠
+        路径的唯一汇聚点，供上层做表情归位等收尾（回调抛异常被吞，不致命）。"""
         if self.state == SLEEP:
             return None
         self.state = SLEEP
+        if self.on_sleep is not None:
+            try:
+                self.on_sleep(reason)
+            except Exception:
+                pass                # 回调失败不影响状态机（live2d 复位等属上层展示）
         self._farewell = FAREWELL_BYE if reason == "bye" else FAREWELL_TIMEOUT
         return self._farewell
 

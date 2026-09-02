@@ -152,6 +152,37 @@ sequenceDiagram
 - **扩展点**：controller 提供 `register_callbacks(on_mood=...)` 与 `ctrl.mood`（当前心态，
   LLM 没带标记时为「平和」），供上层做表情显示 / 驱动 TTS 情绪等。
 
+## live2d 表情联动（心态 → 桌宠表情，默认关）
+
+把 LLM 每轮回复带的【心态：xxx】实时驱动到 live2d 桌宠（`desktop_pet.py`）——AI 开口前
+角色就切到对应情绪，说话时嘴随音频自动开合。
+
+- **怎么开**：桌宠先跑 `python desktop_pet.py --emotion 平和 --listen --control-port 5000`
+  （`--listen` 让嘴随系统播放音频对口型）；voice1 再加 `--live2d-port 5000`。
+- **启用三级门槛**（缺一不启用）：心态标记开（`--no-mood-marker` 则心态无从解析）→ 给了
+  `--live2d-port` → **启动时 TCP 测活成功**。不给端口 = 不启用，行为与未加此功能完全一致。
+- **测活即复位**：连上那一刻立即发一条「平和」——无论桌宠以什么表情启动，voice1 接管后从
+  平和起。
+- **测活失败**：打印一条 `[live2d] 表情联动关闭…请确认已先启动 desktop_pet.py` 告知用户，
+  **彻底禁用、不重试**——对话一切照常，只是不切表情。
+- **运行中**：每轮心态解析到（`on_mood`）→ 异步发一条 `{"emotion":"心态名"}`。若 live2d
+  中途退出：**继续如常发送**，每次失败打印"live2d server 连接失败，请检查"提醒——桌宠可能
+  重启回来，不做自动停用。
+- **复位点**（归位平和）：① 初始化测活成功时；② **拜拜/静默超时回休眠**时（角色待机不该
+  一直挂着"开心/生气"）；③ **Ctrl+C 退出**时（桌宠常驻，voice1 退后角色回平和待机）。
+- **协议**：原始 TCP `127.0.0.1:PORT`，一行一个 JSON `{"emotion":"开心"}\n`（UTF-8、
+  `ensure_ascii=False`、`\n` 结尾，无响应）。voice1 的 16 心态名与 live2d `EMOTIONS` 键
+  **完全一致**，恒等映射，无需转换表。
+- **只发 emotion 不碰 mouth**：说话期嘴的自动开合由 live2d 自己的 `--listen`（WASAPI 回环
+  对口型）负责——voice1 若发 `{"mouth":…}` 反会被桌宠音频能量线程覆盖，故不接管。
+- **实现**：`dialogue/live2d.py` 的 `Live2dEmitter`——构造**同步测活**（连上即复位平和，
+  失败禁用）；`on_mood` 回调触发 `emit()` 只写状态 + 唤醒 event（微秒级，**不阻塞 LLM
+  线程**）；实际发送在常驻 daemon worker（单线程串行、最新值覆盖）。回休眠复位挂
+  `wake.go_sleep()` 的 `on_sleep` 回调（bye / 静默超时两条回休眠路径的**唯一汇聚点**，
+  见 `dialogue/wake.py`）。
+- **headless 测试**：`tests/test_live2d.py`——假 TCP server 断言送达、测活失败禁用、
+  复位归位（跑法 `PYTHONIOENCODING=utf-8 …/python.exe tests/test_live2d.py`）。
+
 ## 会话历史存档（本地记录，默认开）
 
 每 `--history-dump-interval` 秒（默认 **300**=5 分钟）把**完整对话状态**覆盖写到一个

@@ -89,6 +89,7 @@ from tts import RealtimeTTS              # noqa: E402  voice0
 from dialogue import DialogueController, OpenAICompatibleClient  # noqa: E402
 from dialogue.mic import MicAGC, check_mic_signal, pick_input_device  # noqa: E402
 from dialogue.wake import WakeSession, ACTIVE          # noqa: E402  休眠/对话状态机
+from dialogue.live2d import Live2dEmitter              # noqa: E402  心态→live2d 表情（--live2d-port）
 from asr.core.audio import resample_to   # noqa: E402
 
 SR = 16000
@@ -265,6 +266,9 @@ def main():
                     help="心态标记【心态：xxx】（默认开）：LLM 回复带的心态标记只在送 TTS 时剥掉"
                          "不念，正文/历史/存档/控制台保留；--no-mood-marker 关闭后代码行为与未改"
                          "造一致（此时若 user_prompt.txt 仍要求吐标记，会被 TTS 念出来）")
+    ap.add_argument("--live2d-port", type=int, default=None,
+                    help="live2d 表情联动端口（如 5000）：LLM 心态→发送 desktop_pet.py 切表情。"
+                         "启动即测活：连不上则打印提示并关闭（不重试）；需 mood_marker 开启，不传=不启用")
     args = ap.parse_args()
 
     # ---- 麦克风 ----
@@ -313,6 +317,20 @@ def main():
                               post_commit_window=args.post_commit_window / 1000.0,
                               max_context_tokens=args.max_context_tokens,
                               mood_marker=args.mood_marker)
+
+    # ---- live2d 表情联动（LLM 心态 → 切 desktop_pet 表情）----
+    # 启用三前提：mood_marker 开（--no-mood-marker 则心态无从解析）+ --live2d-port + 启动测活成功。
+    # 构造即同步测活并发「平和」归位；连不上内部打印并彻底禁用（不重试、无 worker）。
+    live2d = None
+    if args.live2d_port is not None:
+        if not args.mood_marker:
+            print("[live2d] 已 --no-mood-marker 关闭心态解析，忽略 --live2d-port（表情联动不启用）",
+                  flush=True)
+        else:
+            live2d = Live2dEmitter(port=args.live2d_port)
+            if live2d.enabled:
+                print("[live2d] 表情联动就绪 → 127.0.0.1:%d（已复位平和）"
+                      % args.live2d_port, flush=True)
 
     # ---- 控制台 + 回调接线 ----
     con = _Console()
@@ -375,6 +393,11 @@ def main():
         # post-commit barge：AI 已答完但音频未开播，用户补了尾巴 → 撤答复重答
         con.status("[合并] 撤回了刚才的答复，正在重答完整问题…")
 
+    def on_mood(mood):
+        # LLM 回复开头解析到【心态：xxx】→ 送 live2d 切表情（端口可用才真正连）
+        if live2d is not None:
+            live2d.emit(mood)
+
     asr.on_partial(on_partial)
 
     def on_sentence(r):
@@ -394,7 +417,11 @@ def main():
     ctrl.register_callbacks(on_user=on_user, on_ai_delta=on_ai_delta,
                             on_ai_sentence=on_ai_sentence,
                             on_llm_start=on_llm_start, on_llm_error=on_llm_error,
-                            on_merge_rollback=on_merge_rollback)
+                            on_merge_rollback=on_merge_rollback, on_mood=on_mood)
+    if live2d is not None:
+        # 回休眠唯一汇聚点 go_sleep()（bye 在 on_sentence / timeout 在 feed_decision 内部）
+        # → 复位「平和」：角色回休眠待机不该继续挂着"开心/生气"
+        wake.on_sleep = lambda _reason: live2d.reset()
     # 注意 on_ai_delta 由 LLM 线程回调，控制台写入线程安全（单写者串行 + 锁由 controller 保证时序）
 
     print("就绪！开始对话（Ctrl+C 退出）。打断词=%s，回声门控=%s，VAD尾长=%dms，"
@@ -527,6 +554,8 @@ def main():
             wake_det.close()
         asr.close()
         ctrl.close()
+        if live2d is not None:
+            live2d.close()                        # 归位「平和」+ 停发送 worker
         tts.close()
         print("已退出。", flush=True)
 
