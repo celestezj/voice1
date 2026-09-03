@@ -89,8 +89,87 @@ from tts import RealtimeTTS              # noqa: E402  voice0
 from dialogue import DialogueController, OpenAICompatibleClient  # noqa: E402
 from dialogue.mic import MicAGC, check_mic_signal, pick_input_device  # noqa: E402
 from dialogue.wake import WakeSession, ACTIVE          # noqa: E402  休眠/对话状态机
-from dialogue.live2d import Live2dEmitter              # noqa: E402  心态→live2d 表情（--live2d-port）
+from dialogue.live2d import Live2dEmitter              # noqa: E402  心态→表情 + 全 TTS 文本→说话框（--live2d-port）
 from asr.core.audio import resample_to   # noqa: E402
+
+
+class _SayTTS:
+    """包一层 voice0 RealtimeTTS：让**所有**进 TTS 的文本都显示到 live2d 桌宠说话框，
+    并在**一轮播放真正播完**后自动复位（收框 + 表情，`--live2d-idle-reset` 开关）。
+
+    对话回复句（controller._submit_tts 剥心态标记后）、就绪语/告别语（_say）、启动问候
+    都经本代理 submit → 每次先 `live2d.say(text)`（非阻塞入队）再真正提交 voice0。
+    voice0 无播放回调，守护线程用 Job.done + "仍是最新" 判排空（同 controller._tts_watch
+    模式）。但"队列排空"≠"一轮播完"：LLM 流中句与句之间队列也会短暂排空，若在那时复位，
+    气泡会在一句长回复中途被收掉、表情提前归位。故排空后再等一小段结算窗、并确认
+    `active_check`（controller.turn_active = LLM 流在途或 TTS 队列非空）为 False，才视为
+    一轮播完 → 调 idle_cb。active_check 在 ctrl 构造完成后再注入（本代理先于 ctrl 创建）。
+    live2d 未启用时本代理不构造（tts 保持原样），行为与未加 live2d 完全一致。"""
+
+    def __init__(self, tts, say_cb, idle_cb=None):
+        self._tts = tts
+        self._say_cb = say_cb            # live2d.say（live2d 禁用时内部短路）
+        self._idle_cb = idle_cb          # 一轮播完回调（None=不自动复位）
+        self._active_check = None        # set_active_check 注入：返回 controller.turn_active
+        self._lock = threading.Lock()
+        self._latest = None              # 最近提交的 voice0 Job（.done/.wait）
+        self._watcher = None
+
+    def set_active_check(self, fn):
+        """ctrl 构造后注入：fn() 返回一轮对话是否仍在进行（LLM 流在途 / TTS 队列非空）。"""
+        self._active_check = fn
+
+    def submit(self, text):
+        """拦截所有文本：先发 live2d 说话框，再真正提交 voice0（返回原 Job）。"""
+        self._say_cb(text)               # 非阻塞；纯标记剥空句不会走到这
+        job = self._tts.submit(text)
+        with self._lock:
+            self._latest = job
+            watcher = self._watcher
+        if watcher is None or not watcher.is_alive():
+            self._watcher = threading.Thread(target=self._run,
+                                             name="say-tts-watch", daemon=True)
+            self._watcher.start()
+        return job
+
+    def _drained(self):
+        """队列真正排空：最近 Job 播完/被取消，且其间无更新的提交（有则改盯最新的）。"""
+        while True:
+            with self._lock:
+                job = self._latest
+            if job is None:
+                time.sleep(0.05)
+                continue
+            job.wait()                   # 阻塞到播完/被取消（voice0 永不悬挂）
+            with self._lock:
+                if self._latest is not job:
+                    continue             # 有新提交 → 还没排空
+                self._latest = None      # 已排空，清标记防重复处理
+            return
+
+    def _run(self):
+        """排空 → 结算窗（controller busy 异步回落）→ 有新提交则继续盯；真排空且一轮
+        已结束（active_check False）→ idle_cb。一轮仍在进行（流停顿）→ 退出等下条 submit
+        重启 watcher。自播（就绪/告别/问候语）不入 controller，同样走 idle_cb 收尾。"""
+        while True:
+            self._drained()
+            time.sleep(0.3)                      # 结算窗：controller busy 回落是异步毫秒级
+            with self._lock:
+                more = self._latest is not None  # 结算窗内有新任务入队？
+            if more:
+                continue                          # 有新任务 → 继续盯
+            if self._active_check is not None and self._active_check():
+                return                            # 一轮仍在进行（LLM 跨句停顿）→ 下条 submit 重启
+            if self._idle_cb is not None:
+                self._idle_cb()                   # 一轮播放真正结束 → 复位（收框 + 表情）
+            return
+
+    def interrupt(self):
+        return self._tts.interrupt()
+
+    def __getattr__(self, name):
+        return getattr(self._tts, name)
+
 
 SR = 16000
 
@@ -267,8 +346,14 @@ def main():
                          "不念，正文/历史/存档/控制台保留；--no-mood-marker 关闭后代码行为与未改"
                          "造一致（此时若 user_prompt.txt 仍要求吐标记，会被 TTS 念出来）")
     ap.add_argument("--live2d-port", type=int, default=None,
-                    help="live2d 表情联动端口（如 5000）：LLM 心态→发送 desktop_pet.py 切表情。"
-                         "启动即测活：连不上则打印提示并关闭（不重试）；需 mood_marker 开启，不传=不启用")
+                    help="live2d 桌宠联动端口（如 5000，desktop_pet.py --control-port）：LLM "
+                         "心态→切表情，且**所有**送 TTS 的文本→头顶说话框（对话回复/就绪语/"
+                         "告别语/启动问候）。启动即测活并补发恢复初始状态；连不上则打印提示并关闭"
+                         "（不重试）；需 mood_marker 开启，不传=不启用")
+    ap.add_argument("--live2d-idle-reset", action=argparse.BooleanOptionalAction, default=True,
+                    help="一轮对话播放结束后自动复位 live2d（收说话框 + 表情回平和）（默认开）："
+                         "这轮回复播完、气泡不再需要时把桌宠恢复初始状态；--no-live2d-idle-reset "
+                         "关闭后气泡/表情保持到下一轮或拜拜/超时/停下才清")
     args = ap.parse_args()
 
     # ---- 麦克风 ----
@@ -307,20 +392,10 @@ def main():
                       vad_threshold_db=args.vad_threshold_db,   # 默认 -35dB：调低提升远距离灵敏度
                       profile=True, hotword_file=args.hotword_file, debug=args.debug,
                       interrupt_words=interrupt_words)
-    tts = RealtimeTTS(device=args.tts_device, backend="melo", mode="queue",
-                      normalize=args.tts_normalize,   # None=原样；rms/agc=响度归一化（voice0）
-                      profile=True, debug=args.debug)
-    ctrl = DialogueController(llm, tts, system_prompt=system_prompt,
-                              max_history_messages=args.max_history or None,
-                              reply_hold=args.reply_hold,
-                              merge_window=args.merge_window / 1000.0,
-                              post_commit_window=args.post_commit_window / 1000.0,
-                              max_context_tokens=args.max_context_tokens,
-                              mood_marker=args.mood_marker)
-
-    # ---- live2d 表情联动（LLM 心态 → 切 desktop_pet 表情）----
-    # 启用三前提：mood_marker 开（--no-mood-marker 则心态无从解析）+ --live2d-port + 启动测活成功。
-    # 构造即同步测活并发「平和」归位；连不上内部打印并彻底禁用（不重试、无 worker）。
+    # ---- live2d 桌宠联动（须先于 tts：全 TTS 文本经 _SayTTS 代理送到说话框）----
+    # 启用前提：mood_marker 开（--no-mood-marker 则心态无从解析）+ --live2d-port + 启动测活成功。
+    # 构造即同步测活并补发一条恢复初始状态 {emotion:null,say:null}（清掉桌宠上次遗留的气泡/表情）；
+    # 连不上内部打印并彻底禁用（不重试、无 worker）。
     live2d = None
     if args.live2d_port is not None:
         if not args.mood_marker:
@@ -329,8 +404,29 @@ def main():
         else:
             live2d = Live2dEmitter(port=args.live2d_port)
             if live2d.enabled:
-                print("[live2d] 表情联动就绪 → 127.0.0.1:%d（已复位平和）"
+                print("[live2d] 联动就绪 → 127.0.0.1:%d（已复位初始状态）"
                       % args.live2d_port, flush=True)
+
+    tts = RealtimeTTS(device=args.tts_device, backend="melo", mode="queue",
+                      normalize=args.tts_normalize,   # None=原样；rms/agc=响度归一化（voice0）
+                      profile=True, debug=args.debug)
+    idle_tts = None                        # 包一层：对话句/就绪语/告别语/启动问候都送说话框
+    if live2d is not None and live2d.enabled:
+        def _round_idle():
+            if args.live2d_idle_reset:
+                live2d.reset()             # 一轮播放真正播完 → 收框 + 表情回平和（开关控制）
+        idle_tts = _SayTTS(tts, live2d.say, idle_cb=_round_idle)
+        tts = idle_tts
+
+    ctrl = DialogueController(llm, tts, system_prompt=system_prompt,
+                              max_history_messages=args.max_history or None,
+                              reply_hold=args.reply_hold,
+                              merge_window=args.merge_window / 1000.0,
+                              post_commit_window=args.post_commit_window / 1000.0,
+                              max_context_tokens=args.max_context_tokens,
+                              mood_marker=args.mood_marker)
+    if idle_tts is not None:
+        idle_tts.set_active_check(lambda: ctrl.turn_active)   # 判"真实播完"需 controller
 
     # ---- 控制台 + 回调接线 ----
     con = _Console()
@@ -413,7 +509,12 @@ def main():
         ctrl.feed_asr_sentence(r)
 
     asr.on_sentence(on_sentence)
-    asr.on_interrupt(ctrl.hard_stop)                # 用户说"停下"→ 立即终止 LLM+TTS
+    def _on_interrupt():
+        # 用户说"停下"→ 立即终止 LLM+TTS；live2d 同步收说话框 + 表情复位（用户拍板）
+        ctrl.hard_stop()
+        if live2d is not None:
+            live2d.reset()
+    asr.on_interrupt(_on_interrupt)
     ctrl.register_callbacks(on_user=on_user, on_ai_delta=on_ai_delta,
                             on_ai_sentence=on_ai_sentence,
                             on_llm_start=on_llm_start, on_llm_error=on_llm_error,
@@ -555,8 +656,8 @@ def main():
         asr.close()
         ctrl.close()
         if live2d is not None:
-            live2d.close()                        # 归位「平和」+ 停发送 worker
-        tts.close()
+            live2d.close()                        # 恢复初始状态（收框+表情平和）+ 停发送 worker
+        tts.close()                               # 若 tts 是 _SayTTS 代理，__getattr__ 落到真对象
         print("已退出。", flush=True)
 
 

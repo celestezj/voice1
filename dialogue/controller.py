@@ -124,6 +124,16 @@ class DialogueController:
         """TTS 是否在播/待播（回声门控依据）。GIL 原子读，mic 回调每块直读无锁。"""
         return self._tts_busy
 
+    @property
+    def turn_active(self):
+        """一轮对话是否仍在进行：LLM 读流线程在途（跨句停顿仍算）或 TTS 队列在播/待播。
+
+        `_tts_busy` 在流中句与句之间也会短暂回落（最近提交的 Job 播完即回落），不能单独
+        代表"一轮播完"——live2d「一轮播完自动复位」用本属性判真实播完（防 LLM 句中停顿
+        被误判为播完、气泡中途收掉/表情提前归位）。GIL 原子读，无锁。"""
+        return (self._stream_thread is not None and self._stream_thread.is_alive()) \
+            or self._tts_busy
+
     def _build_messages_locked(self):
         """构建本次 LLM 请求的消息列表（调用方持锁）：system(+摘要)+历史+最新用户问题。"""
         system = self._system

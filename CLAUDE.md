@@ -144,18 +144,24 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `× LLM 出错`=流抛异常（`on_llm_error`）；`[门控]`=回声门控转换提示
   （AI 播放期 mic 只听"停下"，此刻说话不被识别——离远/音量低时 VAD 不闭句，句子
   "悬在流式 cache"永远不定稿，正是`… `行无后续的成因）。
-- **live2d 表情联动**（`--live2d-port PORT`，可选）：LLM 心态【心态：xxx】→ 发 desktop_pet
-  桌宠切表情。**启用三级门槛** = 心态标记开（`--no-mood-marker` 则无从解析）+ 给了端口 +
-  **启动测活成功**——连上瞬间复位发「平和」（桌宠初始表情归位）；连不上打印一条
+- **live2d 桌宠联动**（`--live2d-port PORT`，可选）：**两通道**——① LLM 心态【心态：xxx】→
+  发 desktop_pet 切表情；② **所有送 TTS 的文本**→ 角色头顶说话框（对话回复/就绪语/告别语/
+  启动问候一个不落，靠包一层 `_SayTTS` 的 tts 代理自动 say，controller 零改动）。
+  **启用三级门槛** = 心态标记开 + 给了端口 + **启动测活成功**——连上瞬间补发一条恢复初始
+  状态 `{"emotion":null,"say":null}`（清桌宠遗留表情/气泡）；连不上打印一条
   `[live2d] 表情联动关闭…`并**彻底禁用不重试**。运行中 live2d 退出 → **继续发送** + 每次
-  失败打印"live2d server 连接失败，请检查"（桌宠可能重启回来，不做自动停用）。复位点：
-  初始化测活 / 拜拜 / 静默超时回休眠 / Ctrl+C 退出 → 都归位「平和」。协议 = 原始 TCP
-  127.0.0.1:PORT 一行 JSON `{"emotion":"中文心态"}`（16 心态与 live2d EMOTIONS 键**恒等
-  映射**）；只发 emotion 不碰 mouth（嘴由 live2d `--listen` 对口型负责）。实现
-  `dialogue/live2d.py` `Live2dEmitter`——`on_mood` 回调触发 `emit()` 只写状态+唤醒（微秒级，
-  **不阻塞 LLM 线程**），daemon worker 单线程串行发送；回休眠复位挂 `wake.go_sleep()` 的
-  `on_sleep` 回调（bye/timeout 唯一汇聚点）。headless 测试 `tests/test_live2d.py`
-  （假 TCP server 断言送达/测活失败禁用/复位归位）。详见 docs/voice-dialogue.md「live2d 表情联动」。
+  失败打印"live2d server 连接失败，请检查"（桌宠可能重启回来，不做自动停用）。复位 =
+  **一条组合消息**（表情回平和 + 收框），触发点：初始化测活 / 拜拜 / "停下"打断 / 静默超时
+  回休眠 / Ctrl+C 退出（无条件），以及**一轮播放真正播完**（`--live2d-idle-reset` 默认开，
+  `--no-…` 关；判定用 controller 新增 `turn_active`=LLM 流在途或 TTS 队列非空，防句中停顿
+  误收框）。协议 = 原始 TCP 127.0.0.1:PORT 一行 JSON、UTF-8+\n、无响应；16 心态与 live2d
+  EMOTIONS 键**恒等映射**；只发 emotion/say 不碰 mouth（嘴由 live2d `--listen` 对口型负责）。
+  实现 `dialogue/live2d.py` `Live2dEmitter`——`emit()`/`say()`/`reset()` 只在锁内入队
+  （微秒级**不阻塞 LLM 线程**），daemon worker FIFO 串行发送；回休眠复位挂 `wake.go_sleep()`
+  的 `on_sleep` 回调（bye/timeout 唯一汇聚点），"停下"挂 `asr.on_interrupt` 组合回调
+  （hard_stop + reset）。headless 测试 `tests/test_live2d.py`（假 TCP server 断言
+  emotion/say/reset 送达保序/测活失败禁用/bye/timeout 复位归位）。
+  详见 docs/voice-dialogue.md「live2d 桌宠联动」。
 - headless 测试：`tests/test_wake.py`（**已入库**）——WakeSession 状态机 + sherpa 关键词
   文件唯一化（唤醒/退出/超时/自播门控/幂等）；`tmp/test_dialogue.py`（gitignored）——fake
   LLM/TTS 覆盖切句/barge-in/hold-off/hard_stop/busy/压缩/引擎钩子（`RealtimeASR.__new__`
@@ -180,7 +186,7 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
                  controller.py（DialogueController：barge-in/hard_stop/tts_busy/hold-off/历史压缩）/
                  mic.py（MicAGC/check_mic_signal/pick_input_device）/
                  wake.py（WakeSession：休眠/对话两态状态机，唤醒/退出/静默超时，纯逻辑可测）/
-                 live2d.py（Live2dEmitter：LLM 心态 → live2d 桌宠表情，启动测活+复位平和）
+                 live2d.py（Live2dEmitter：心态→表情 + 全 TTS 文本→说话框，启动测活+组合复位）
                  config.local.json（机密 API key，gitignored，绝不提交）
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）
 examples/        transcribe_file / record_mic / demonstrate_interrupt（T12）/ demonstrate_streaming（T13）/
