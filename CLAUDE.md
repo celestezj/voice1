@@ -146,7 +146,11 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   "悬在流式 cache"永远不定稿，正是`… `行无后续的成因）。
 - **live2d 桌宠联动**（`--live2d-port PORT`，可选）：**两通道**——① LLM 心态【心态：xxx】→
   发 desktop_pet 切表情；② **所有送 TTS 的文本**→ 角色头顶说话框（对话回复/就绪语/告别语/
-  启动问候一个不落，靠包一层 `_SayTTS` 的 tts 代理自动 say，controller 零改动）。
+  启动问候一个不落，靠包一层 `SayTTS`（dialogue/say_tts.py）的 tts 代理自动 say，controller
+  零改动）。**说话框逐句链式跟播不抢发**：voice0 queue 提交即入队、串行播放——LLM 一口气吐
+  3 句时 3 个 Job 瞬间入队、音频还在播第 1 句；若 submit 时就发文本，气泡会被末句立刻刷新。
+  SayTTS 让第 1 句提交即发、之后每句等前一句播完（job.done）才发（prev-done≈下句开播），
+  气泡永远显示"正在播的那句"；被打断（hard_stop，job.canceled）→ 作废句文本丢弃。
   **启用三级门槛** = 心态标记开 + 给了端口 + **启动测活成功**——连上瞬间补发一条恢复初始
   状态 `{"emotion":null,"say":null}`（清桌宠遗留表情/气泡）；连不上打印一条
   `[live2d] 表情联动关闭…`并**彻底禁用不重试**。运行中 live2d 退出 → **继续发送** + 每次
@@ -186,7 +190,8 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
                  controller.py（DialogueController：barge-in/hard_stop/tts_busy/hold-off/历史压缩）/
                  mic.py（MicAGC/check_mic_signal/pick_input_device）/
                  wake.py（WakeSession：休眠/对话两态状态机，唤醒/退出/静默超时，纯逻辑可测）/
-                 live2d.py（Live2dEmitter：心态→表情 + 全 TTS 文本→说话框，启动测活+组合复位）
+                 live2d.py（Live2dEmitter：心态→表情 + 全 TTS 文本→说话框，启动测活+组合复位）/
+                 say_tts.py（SayTTS：tts 代理，文本→说话框逐句链式跟播+一轮播完复位，纯逻辑可测）
                  config.local.json（机密 API key，gitignored，绝不提交）
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）
 examples/        transcribe_file / record_mic / demonstrate_interrupt（T12）/ demonstrate_streaming（T13）/

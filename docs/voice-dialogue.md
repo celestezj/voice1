@@ -164,8 +164,13 @@ sequenceDiagram
   `--live2d-port` → **启动时 TCP 测活成功**。不给端口 = 不启用，行为与未加此功能完全一致。
 - **说话框覆盖全部 TTS 文本**：不只是 LLM 对话回复句（剥掉心态标记后的正文），**就绪语
   （"在的，我在听"）、告别语、启动问候（"你好，我在听。"）**都算——凡是 `tts.submit` 的
-  文本就上说话框。实现上把 `tts` 包了一层 `_SayTTS`（voice_dialogue.py）：`submit` 先
-  `live2d.say(text)` 再真正交 voice0，controller 零改动，文本来源一个不落。
+  文本就上说话框。实现上把 `tts` 包了一层 `SayTTS`（`dialogue/say_tts.py`），controller
+  零改动，文本来源一个不落。
+- **逐句链式跟播（不抢发）**：voice0 `mode="queue"` 提交即入队、串行播放——LLM 一口气吐
+  3 句时 3 个 Job 瞬间入队、音频却还在播第 1 句。若在 submit 那一刻就发文本，气泡会被
+  最后一句立刻刷新（音频没跟上）。故 `SayTTS` 做逐句链：**第 1 句文本提交即发，之后每句
+  都等前一句播完（`job.done`）才发**——queue 模式下 prev-done ≈ 下句开播，气泡永远显示
+  "正在播的那句"、随音频逐句推进。被打断（`hard_stop`）→ 作废句文本丢弃不播。
 - **复位消息 = 一条组合**：`{"emotion":null,"say":null}` 同时恢复默认表情平和 + 隐藏说话框
   （live2d 协议：给值=设置、`null`=清除；气泡是"粘性"的，不显式清就一直挂着）。
 - **复位点**（都发这条组合消息）：① 初始化测活成功时（清掉桌宠上次遗留的表情/气泡）；
@@ -193,8 +198,9 @@ sequenceDiagram
   见 `dialogue/wake.py`）；"停下"挂在 `asr.on_interrupt` 的组合回调（`ctrl.hard_stop()` +
   `live2d.reset()`）。
 - **headless 测试**：`tests/test_live2d.py`——假 TCP server 断言送达（emotion/say/reset
-  保序）、测活失败禁用、复位归位、bye/timeout 联动（跑法
-  `PYTHONIOENCODING=utf-8 …/python.exe tests/test_live2d.py`）。
+  保序）、测活失败禁用、复位归位、bye/timeout 联动；`tests/test_say_tts.py`——假 TTS/Job
+  断言逐句链式不抢发、打断丢作废句、跨句停顿不复位（跑法
+  `PYTHONIOENCODING=utf-8 …/python.exe tests/test_live2d.py`，`test_say_tts.py` 同理）。
 
 ## 会话历史存档（本地记录，默认开）
 
