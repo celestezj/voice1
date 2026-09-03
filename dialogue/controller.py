@@ -26,9 +26,9 @@ import time
 class DialogueController:
     # LLM 切句边界 + 超长无标点硬切参数
     _BOUNDARY = "。！？…；\n"     # 句末边界（送 TTS 的切点）
-    _COMMA = "，、："
+    _SOFT_CUT = " 　，、："    # 兜底硬切的可落点：空格分句缝 + 逗号类（非句末边界）
     _HARD_MAX = 40                # 无标点累积超此长度 → 兜底硬切（保首包延迟）
-    _COMMA_WINDOW = 12            # 硬切时回找逗号的最大回看长度
+    _SOFT_WINDOW = 20             # 硬切时在末 _SOFT_WINDOW 字符里回找软分句缝（绝不撕词）
 
     # 心态标记：LLM 回复开头带【心态：xxx】（user_prompt.txt 约定），代表表情、不念出来。
     # 支持【】与 [] 两种括号；_MOOD_RE 取首个心态（on_mood 回调），_MOOD_SUB 只在送 TTS 时
@@ -472,14 +472,17 @@ class DialogueController:
                 last = i
         if last >= 0 and len(buf[:last + 1].strip()) >= 2:
             return last + 1
-        # 2) 超长无标点 → 硬切（优先回找逗号，否则硬切 _HARD_MAX）
+        # 2) 超长无标点 → 兜底硬切（保首包延迟）。绝不撕词：先回找末 _SOFT_WINDOW
+        #    字符里的软分句缝（空格/逗号类——LLM 按空格分短句，切在缝上停顿自然）；
+        #    找不到才硬切 _HARD_MAX。硬切落在词中间会把词撕开（"钟|表"、"黑眼|圈"），
+        #    每段独立合成、queue 缝里插停顿，听感"黑眼…停顿…圈"（实测）。
         if n > self._HARD_MAX:
-            start = max(0, n - self._COMMA_WINDOW)
+            start = max(0, n - self._SOFT_WINDOW)
             ci = -1
-            for ch in self._COMMA:
+            for ch in self._SOFT_CUT:
                 i = buf[start:].rfind(ch)
-                if i >= 0 and i + start > ci:
-                    ci = i + start
+                if i >= 0 and start + i > ci:
+                    ci = start + i
             if ci >= start:
                 return ci + 1
             return self._HARD_MAX
