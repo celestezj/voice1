@@ -207,6 +207,7 @@ reports/         bench 报告（gitignored）
 - `docs/asr-architecture-decision.md` = **选型结论与硬指标**（ADR，从立项第一天写起）。
 - `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比/**§9 热词纠错（同音字）**）。
 - `docs/voice-dialogue.md` = **语音对话使用 + 架构**（快速开始含推荐 `--vad-tail 300`；自定义系统提示词 `--system-prompt`；会话历史存档 `--history-dump`；参数白话解释 vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表；mermaid 线程时序图 + 阻塞/非阻塞说明）。
+- `docs/agent-integration.md` = **本地 agent 接入设计（方案稿，随实现更新）**（`--brain llm|agent` 开关、常驻 claude 会话、agent 模式旁路历史/压缩/系统提示词、打断=ESC、权限【询问】交互、重启续会话、文件级改造清单、技术风险）。
 - `docs/backend-guide.md` = **新增后端接入指南**（流式/非流式后端契约、三步接入清单、引擎消费语义、验收纪律，接 SenseVoice 等新模型时先读）。
 - `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。
