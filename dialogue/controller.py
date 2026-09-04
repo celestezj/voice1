@@ -35,16 +35,23 @@ class DialogueController:
     # 剥掉标记不读；标记保留在正文/历史/存档/控制台（它是模型的真实输出，必须带上）。
     _MOOD_RE  = re.compile(r"[【\[]心态[:：]\s*([^】\]]+)[】\]]")
     _MOOD_SUB = re.compile(r"[【\[]心态[:：][^】\]]*[】\]]")
+    # 权限交互标记【询问】（agent 模式人格约定）：正文/存档保留，送 TTS 时剥掉括号不念。
+    _ASK_RE   = re.compile(r"[【\[]询问[】\]]")
     _MOODS = {"平和", "开心", "兴奋", "惊喜", "温柔", "关切", "好奇", "期待",
               "无奈", "失望", "沮丧", "难过", "担心", "不满", "生气", "愤怒"}
 
     def __init__(self, llm, tts, *, system_prompt=None, max_history_messages=None,
                  reply_hold=0.0, merge_window=0.0, post_commit_window=0.0,
                  max_context_tokens=40000, recent_keep=6, headroom=4000,
-                 mood_marker=True):
+                 mood_marker=True, agent=None):
         # mood_marker=False → 本类的全部心态逻辑跳过（剥标记/解析/默认心态），
         # 行为与本次改动前完全一致；是否让 LLM 吐标记由 user_prompt.txt 里的约定决定。
+        #
+        # agent（ClaudeAgentClient，可选）：不为 None → **agent 模式**。自实现的历史/
+        # 压缩/系统提示词全部旁路，上下文在 claude 会话里；controller 只做
+        # "ASR 句 → agent → 最终结论 → TTS"。打断走 agent.abort()（等价 ESC，不 kill 进程）。
         self._llm = llm
+        self._agent = agent
         self._tts = tts
         self._system = system_prompt or (
             "你是语音助手。回答要口语化、简洁、适合语音播报：不要用 markdown、列表、"
@@ -82,6 +89,10 @@ class DialogueController:
         self._mood_marker = bool(mood_marker)   # 心态标记总开关（False=全部跳过，行为同改动前）
         self._mood = None                # 当前回复解析出的心态（None=尚未解析到标记）
         self._on_mood = None             # 心态标记解析到（供上层显示/表情映射；正文里标记照常保留）
+        # agent 模式专属状态（brain=agent 时使用）
+        self._agent_evts = {}            # gen → Event（每回合一个，结果/作废唤醒对应收尾线程）
+        self._agent_error = None         # 最近一次 agent 回合的错误文本（None=正常）
+        self._assistant_display = ""     # agent 流式出字缓冲（仅控制台显示；TTS 仍取最终结论）
 
     # ---------------- 回调注册（供主程序/控制台接）----------------
     def register_callbacks(self, on_user=None, on_ai_delta=None,
@@ -97,6 +108,13 @@ class DialogueController:
         self._on_merge_rollback = on_merge_rollback   # post-commit barge 撤答复（供控制台提示）
         self._on_mood = on_mood
 
+    def set_agent(self, agent):
+        """绑定 agent 客户端并接管其结果回调（agent 模式大脑）。须在 agent.start() 前调用。"""
+        self._agent = agent
+        if agent is not None:
+            agent.set_callbacks(on_result=self._on_agent_result,
+                                on_partial=self._on_agent_partial)
+
     @property
     def history(self):
         with self._lock:
@@ -109,15 +127,22 @@ class DialogueController:
         因此周期性存档**不阻塞** LLM 读流线程。字段即 LLM 可见的完整输入：
         system（系统提示词，永不压缩）+ summary（压缩摘要，拼在 system 后）+
         history（已 commit 轮次）+ 未提交的进行中内容。
+        agent 模式：历史旁路（上下文在 claude 会话），额外带 agent_session_id 供审计。
         """
         with self._lock:
-            return {
+            snap = {
                 "system": self._system,
                 "summary": self._summary,
                 "history": list(self._history),
                 "user_turn": self._user_turn,
                 "assistant_full": self._assistant_full,
             }
+        if self._agent is not None:
+            try:
+                snap["agent_session_id"] = self._agent.session_id
+            except Exception:
+                pass
+        return snap
 
     @property
     def tts_busy(self):
@@ -160,14 +185,20 @@ class DialogueController:
                 self._user_turn = ""
             self._assistant_buf = ""
             self._assistant_full = ""
+            self._assistant_display = ""
             self._stream_thread = None
             self._merge_deadline = None    # 有挂起的合并窗口 → 作废（"停下"不续发）
             self._tts.interrupt()          # 立即切音频 + 清队列（快操作）
+        if self._agent is not None:
+            # agent 模式："停下"= ESC。中断当前回合（进程/会话存活、历史保留），
+            # "停下"本身绝不进 agent 上下文（KWS 旁路吞掉触发块）。非阻塞。
+            self._agent.abort()
         self._maybe_compress()             # 历史变了，检查是否需要压缩
 
     # ---------------- TTS 提交 + 忙碌跟踪（voice0 Job.done，不改 voice0）----------------
     def _submit_tts(self, sentence):
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
+        sentence = self._ASK_RE.sub("", sentence)      # 【询问】标记剥掉不念（正文/存档保留）
         if self._mood_marker:                          # 心态标记【心态：xxx】只在送 TTS 时剥掉不读
             sentence = self._MOOD_SUB.sub("", sentence)
             if not sentence:
@@ -207,7 +238,10 @@ class DialogueController:
 
         事件驱动（不常驻监控）：条件=「无在途 LLM 流 + 无压缩在跑 + 用量超阈值 +
         历史够多」。压缩是网络调用，放后台线程做，下一轮对话照常走当前快照。
+        agent 模式整条旁路（上下文在 claude 会话里，claude 自己压缩）。
         """
+        if self._agent is not None:
+            return
         with self._lock:
             if (self._closed or self._compress_running
                     or (self._stream_thread and self._stream_thread.is_alive())):
@@ -274,6 +308,7 @@ class DialogueController:
             self._gen += 1
             self._assistant_buf = ""          # 旧流作废：清缓冲与完整文本
             self._assistant_full = ""
+            self._assistant_display = ""
             if in_flight or post_commit:
                 self._tts.interrupt()         # 在途吐词 / 已答未开播 → 切掉作废音频
             self._stream_thread = None        # 在途流作废（gen 已变，旧线程自行退出）
@@ -285,6 +320,9 @@ class DialogueController:
                 launch = True
         if post_commit and self._on_merge_rollback:
             self._on_merge_rollback()
+        if self._agent is not None and in_flight:
+            # agent 模式：新句取代在途回合 → 先中断（等价 ESC）再重发累计；非阻塞。
+            self._agent.abort()
         if self._on_user:
             self._on_user(result)
         if launch:
@@ -307,7 +345,11 @@ class DialogueController:
             self._user_turn = frag
 
     def _launch_llm(self):
-        """把本轮累计发给 LLM（合并窗口过期 / 窗口=0 立即）。调用方不持锁。"""
+        """把本轮累计发给 LLM（合并窗口过期 / 窗口=0 立即）。调用方不持锁。
+
+        agent 模式分支：不发消息列表，直接 `agent.submit()`（上下文在 claude 会话），
+        结果异步经 `_on_agent_result` 回来，由 `_agent_stream_thread` 收尾。
+        """
         with self._lock:
             if self._closed or not self._user_turn:
                 return
@@ -318,7 +360,27 @@ class DialogueController:
             if self._mood_marker:
                 self._mood = None              # 新一轮：心态标记重新解析
             gen = self._gen
-            messages = self._build_messages_locked()   # system(+摘要)+历史+最新用户问题
+            if self._agent is not None:
+                text = self._user_turn
+                evt = threading.Event()
+                self._agent_evts[gen] = evt    # 该回合的收尾唤醒事件
+                self._assistant_display = ""
+                agent_launch = (text, gen, evt)
+                messages = None
+            else:
+                agent_launch = None
+                messages = self._build_messages_locked()   # system(+摘要)+历史+最新用户问题
+        if agent_launch is not None:
+            text, gen, evt = agent_launch
+            if self._on_llm_start:
+                self._on_llm_start()           # 控制台 "→ LLM 请求中…"（agent 也叫这行）
+            self._agent.submit(text, ctx=gen)  # 非阻塞；结果经 on_result 回来
+            t = threading.Thread(target=self._agent_stream_thread, args=(gen, evt),
+                                 name="dialogue-agent", daemon=True)
+            with self._lock:
+                self._stream_thread = t
+            t.start()
+            return
         t = threading.Thread(target=self._llm_loop, args=(gen, messages),
                              name="dialogue-llm", daemon=True)
         with self._lock:
@@ -399,6 +461,79 @@ class DialogueController:
             if self._on_ai_done and full.strip():
                 self._on_ai_done(full)
             self._maybe_compress()
+
+    # ---------------- agent 模式（brain=agent，旁路历史/压缩/系统提示词）----------------
+    def _on_agent_partial(self, ctx, delta):
+        """agent 流式出字（仅控制台显示；TTS 仍只取最终结论）。在 agent 循环线程执行。
+
+        快操作（持锁累加 + 控制台原地刷新），绝不阻塞 agent 循环。
+        """
+        with self._lock:
+            if self._closed or ctx != self._gen:
+                return
+            self._assistant_display += delta
+            disp = self._assistant_display
+        if self._on_ai_delta:
+            self._on_ai_delta(delta, disp)
+
+    def _on_agent_result(self, ctx, text, is_error):
+        """agent 最终结论回来（agent 循环线程）。ctx 作废（被打断/被取代）→ 只唤醒不碰状态。
+
+        锁内只做状态填充 + evt.set()（最后一步才唤醒，保证收尾线程读到就绪状态）。
+        """
+        with self._lock:
+            if not self._closed and ctx == self._gen:
+                if is_error:
+                    self._agent_error = text or "agent 出错了"
+                else:
+                    self._agent_error = None
+                    self._assistant_buf = text or ""
+                    self._assistant_full = text or ""
+                    if self._mood_marker:
+                        self._parse_mood_locked()
+            evt = self._agent_evts.get(ctx)
+            if evt is not None:
+                evt.set()                          # 唤醒该回合的收尾线程
+
+    def _agent_stream_thread(self, gen, evt):
+        """agent 回合收尾线程：等结果（或回合作废）→ 切句送 TTS / 报错。
+
+        与 LLM 路径 finally 一致：完整文本按句送 TTS、心态兜底「平和」；**不 commit 历史**
+        （上下文在 claude 会话里，agent 模式旁路自实现历史），只清本轮累计。
+        """
+        evt.wait()
+        with self._lock:
+            self._agent_evts.pop(gen, None)
+            if self._closed or gen != self._gen:
+                return                             # 回合已作废（被打断/被新句取代）
+            if self._agent_error:
+                err = self._agent_error
+                self._agent_error = None
+                self._stream_thread = None
+                tail = ""
+                full = ""
+            else:
+                err = None
+                full = self._assistant_full        # 完整回复（保留心态/【询问】标记：审计用）
+                self._emit_sentences(gen)          # 按句送 TTS（_submit_tts 剥心态/【询问】）
+                tail = self._assistant_buf.strip()  # 未切句的残句也要播出来
+                if tail:
+                    self._submit_tts(tail)
+                self._assistant_buf = ""
+                self._assistant_full = ""
+                self._assistant_display = ""
+                if self._mood_marker and self._mood is None:
+                    self._mood = "平和"            # agent 没带标记 → 默认心态
+                self._user_turn = ""               # 本轮累计清空（不 commit 历史）
+                self._stream_thread = None
+        if err is not None:
+            if self._on_llm_error:
+                self._on_llm_error(err)            # 控制台 "× LLM 出错"（agent 也叫这行）
+            return
+        if self._on_ai_sentence and tail:
+            self._on_ai_sentence(tail)
+        if self._on_ai_done and full.strip():
+            self._on_ai_done(full)
 
     def _commit_locked(self, full_text):
         """完整回复才进历史（被打断的回复 gen 不对，根本到不了这里）。调用方持锁。"""
@@ -494,3 +629,5 @@ class DialogueController:
             self._closed = True
             self._gen += 1                    # 让在途线程弃流（不杀线程）
             self._merge_deadline = None       # 结束挂起的合并窗口（_merge_wait 见 _closed 退出）
+        if self._agent is not None:
+            self._agent.close()               # 优雅断开 claude（进程正常结束）+ 停循环线程

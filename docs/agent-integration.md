@@ -1,7 +1,7 @@
 # 语音对话 agent 接入设计（方案稿）
 
-> 状态：**方案讨论已闭环，待实现**。本文记录 2026-08-30~09-04 的设计结论，
-> 随实现过程微调并持续维护更新。实现前先读本文「技术风险 / 待验证点」。
+> 状态：**已实现（2026-09-04），随使用微调**。本文记录 2026-08-30~09-04 的设计结论，
+> 实现过程有实测修正（见「实现补充」），继续维护更新。
 
 ## 背景与动机
 
@@ -121,17 +121,32 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
 - 每次运行把 `session_id` 存到 `sessions/`（已 gitignore）。
 - 重启带 `--agent-resume`（对应 `claude -c`）→ resume 上次的会话 → 历史/上下文原样续上。
 
-## 文件级改造清单（方案，未实施）
+## 文件级改造清单（已实施 2026-09-04）
 
-| 动作 | 文件 | 内容 |
-|---|---|---|
-| 新增 | `dialogue/agent.py` | `ClaudeAgentClient`：起/resume 常驻会话、`query()` 只取最终结论、`abort()`（不 kill）、`close()`、session_id 落盘 |
-| 新增 | `assistant/CLAUDE.md` | 人格（口语化、【心态】标记、【询问】权限规则、技能指引）——独立目录，不进 voice1 工程 CLAUDE.md |
-| 新增 | `assistant/.mcp.json`、`assistant/skills/` | 开灯/天气等能力（按需） |
-| 修改 | `dialogue/controller.py` | `brain` 开关；agent 模式旁路 `_build_messages`/压缩/系统提示；`【询问】`检测 → 等待态 → 同上下文续；`abort()` 钩子 |
-| 修改 | `examples/voice_dialogue.py` | `--brain` / `--agent-resume` / `--agent-dir` 参数 |
-| 修改 | `docs/voice-dialogue.md` + 根 `CLAUDE.md` | 文档 |
-| 不动 | mic / wake / llm.py 现有路径 | 开关关闭时零影响 |
+| 动作 | 文件 | 内容 | 状态 |
+|---|---|---|---|
+| 新增 | `dialogue/agent.py` | `ClaudeAgentClient`：起/resume 常驻会话、`query()` 只取最终结论、`abort()`（不 kill）、`close()`、session_id 落盘 | ✅ |
+| 新增 | `assistant/CLAUDE.md` | 人格（口语化、【心态】标记、【询问】权限规则、技能指引）——独立目录，不进 voice1 工程 CLAUDE.md | ✅ |
+| 新增 | `assistant/.mcp.json`、`assistant/skills/` | 开灯/天气等能力（按需） | ✅ 骨架 |
+| 修改 | `dialogue/controller.py` | `agent` 构造参数；agent 模式旁路 `_build_messages`/压缩/系统提示；`【询问】`送 TTS 剥掉不念（`_ASK_RE`）；`abort()` 钩子（hard_stop / barge） | ✅ |
+| 修改 | `examples/voice_dialogue.py` | `--brain` / `--agent-resume` / `--agent-dir` / `--agent-model` / `--agent-permission-mode` 参数 + 接线 | ✅ |
+| 修改 | `docs/voice-dialogue.md` + 根 `CLAUDE.md` | 文档 | ✅ |
+| 新增 | `tmp/test_agent_flow.py`（gitignored） | agent 全链路集成测试：多轮上下文/partial/abort/【询问】/barge | ✅ |
+| 不动 | mic / wake / llm.py 现有路径 | 开关关闭时零影响 | ✅（回归 13 项全过） |
+
+## 实现补充（2026-09-04 实测修正）
+
+- **partial 增量来自 `StreamEvent` 而非 `AssistantMessage`**：`include_partial_messages=True`
+  时 CLI 发**原始 Anthropic API 流事件**（`StreamEvent.event`），文本增量在
+  `content_block_delta` 的 `delta.text_delta.text`；完整 `AssistantMessage` 与
+  `ResultMessage.result` 仍照常到达。agent.py `_do_query` 只从 StreamEvent 取流式出字、
+  TTS 仍只取 ResultMessage。
+- **controller 集成形态**：agent 结果**异步**回来（on_result 在 agent 循环线程），
+  controller 用 **per-gen `threading.Event`**（`_agent_evts[gen]`）唤醒对应回合的收尾线程
+  `_agent_stream_thread`；作废回合（ctx != 当前 gen）只唤醒不碰状态。`_maybe_compress`/
+  `_build_messages` 在 agent 模式整条旁路（`self._agent is not None` 早退）。
+- **「停下」/ barge 的 abort 顺序**：controller 先 `_gen += 1`（快路径状态清理），锁外再
+  `agent.abort()`（ESC）。下一句提交时 worker 已 drain 干净，无残留消息污染。
 
 ## 技术风险 / 待验证点
 
@@ -141,13 +156,44 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
   发中断信号，语义等价交互式 claude 的 ESC。
 - **会话 resume**：`session_id` 的获取/续接方式（对应 `claude --resume <id>` / `-c`）。
 
+## 技术验证结论（2026-09-04 实测，SDK 0.2.152 / claude 2.1.260）
+
+**机制选型：`claude-agent-sdk`（Python），不用裸 CLI 子进程。**
+裸 `claude --output-format stream-json` 的 stdin 不是 TTY 时自动进 print 模式——
+3 秒内收不到输入就报错退出，**根本不能常驻**。SDK 用内部 messaging socket
+（命名管道）常驻控制，正是为"常驻会话 + 可中断"设计的。
+
+| 验证点 | 结论 |
+|---|---|
+| 常驻多轮 + 上下文连续 | ✅ 同一 `ClaudeSDKClient` 多次 `query()`，会话记住之前内容 |
+| `interrupt()` = ESC | ✅ 进程不 kill；旧回合以 `ResultMessage(subtype='error_during_execution', is_error=True)` 干净收尾，随后新 query 正常 |
+| 跨进程 resume | ✅ `resume=<session_id>` 重建 client 后仍记得会话内容 |
+| `session_id` 格式 | ⚠️ **必须是合法 UUID**（否则 "Invalid session ID"） |
+| 最终结论 | ✅ `ResultMessage.result`；流式文本在 `AssistantMessage.content[].text` |
+| `cwd` 的 CLAUDE.md 自动当人格 | ❌ **不自动加载**——必须显式 `system_prompt=<人格文本>`（实测生效） |
+| 冷启动耗时 | ✅ connect ≈0.6s（冷启动只一次）；热查询 ≈2s |
+| 权限 | `permission_mode` / `allowed_tools` / `disallowed_tools` / `can_use_tool` 钩子 |
+
+**实现要点（踩坑）**：
+- SDK 全部控制方法（connect/query/interrupt/disconnect）是**协程**，须 await；
+  `receive_response()` 是异步迭代器。集成进 controller 的线程模型需要一个
+  常驻 asyncio 事件循环线程（`asyncio.run_coroutine_threadsafe` 桥接）。
+- 每回合必须 drain 到 ResultMessage 再发下一条（打断后尤其如此，否则残留消息
+  污染下一轮 receive——round3 result=None 的成因）。
+- 人格用 `assistant/CLAUDE.md` 作为唯一事实源，连接时读文件内容传 `system_prompt`。
+
 ## 实现顺序
 
-1. 验证 abort 不 kill + resume（技术风险点）。
-2. 按文件级改造清单落代码（先 agent.py，再 controller 开关，再 CLI/文档）。
-3. 验收：开关默认 llm 时行为与现状完全一致；agent 模式下开关灯/天气走能力配置、
-   敏感操作走【询问】、打断走 abort 且不进上下文、重启可续会话。
+1. 验证 abort 不 kill + resume（技术风险点）。**已完成（见上表）**。
+2. 按文件级改造清单落代码（先 agent.py，再 controller 开关，再 CLI/文档）。**已完成**。
+3. 验收：开关默认 llm 时行为与现状完全一致（回归 13 项全过）；agent 模式下开关灯/天气走
+   能力配置、敏感操作走【询问】（实测 agent 回复带【询问】→ TTS 剥掉不念/全文保留）、
+   打断走 abort 且不进上下文（实测 abort 后同会话存活）、重启可续会话。**已完成**。
+   `--agent-resume` 跨进程续会话：**已实测通过**（tmp/test_agent_resume.py：进程1 记暗号
+   落盘 session_id → close → 进程2 resume 同文件 → 记得暗号）。
 
 ## 更新记录
 
 - 2026-09-04：方案闭环，记录设计结论（开关/常驻会话/旁路/打断=ESC/权限【询问】/重启续会话）。
+- 2026-09-04：实现完成 + 实测修正（StreamEvent partial、per-gen 事件收尾、abort 顺序），
+  验收通过（LLM 模式回归 13 项全过 + agent 全链路集成测试 6 项全过）。

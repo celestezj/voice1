@@ -87,7 +87,8 @@ import numpy as np                       # noqa: E402
 import sounddevice as sd                 # noqa: E402
 from asr import RealtimeASR              # noqa: E402  voice1
 from tts import RealtimeTTS              # noqa: E402  voice0
-from dialogue import DialogueController, OpenAICompatibleClient  # noqa: E402
+from dialogue import (DialogueController, OpenAICompatibleClient,  # noqa: E402
+                      ClaudeAgentClient)
 from dialogue.mic import MicAGC, check_mic_signal, pick_input_device  # noqa: E402
 from dialogue.wake import WakeSession, ACTIVE          # noqa: E402  休眠/对话状态机
 from dialogue.live2d import Live2dEmitter              # noqa: E402  心态→表情 + 全 TTS 文本→说话框（--live2d-port）
@@ -272,6 +273,25 @@ def main():
                     help="心态标记【心态：xxx】（默认开）：LLM 回复带的心态标记只在送 TTS 时剥掉"
                          "不念，正文/历史/存档/控制台保留；--no-mood-marker 关闭后代码行为与未改"
                          "造一致（此时若 user_prompt.txt 仍要求吐标记，会被 TTS 念出来）")
+    ap.add_argument("--brain", choices=["llm", "agent"], default="llm",
+                    help="大脑：llm=现有 OpenAI 兼容客户端（默认，零改动）；agent=本地 claude "
+                         "code（claude-agent-sdk 常驻会话），旁路自实现历史/压缩/系统提示词，"
+                         "上下文在 claude 会话里。详见 docs/agent-integration.md")
+    ap.add_argument("--agent-dir", default=None,
+                    help="agent 工作目录（默认 repo 根/assistant/）：该目录的 CLAUDE.md 即人格"
+                         "（连接时显式传 system_prompt），skills/.mcp.json 即 agent 能力")
+    ap.add_argument("--agent-resume", action="store_true",
+                    help="续上次 agent 会话（对应 claude -c/--resume）：读 sessions/"
+                         "agent_session_id.txt 的 session_id 续上次上下文，历史原样保留。"
+                         "不带则新建会话（旧的仍在，随时可再续）")
+    ap.add_argument("--agent-model", default=None,
+                    help="agent 用模型（默认 claude 配置的模型；一般不需要设）")
+    ap.add_argument("--agent-permission-mode",
+                    choices=["default", "acceptEdits", "plan", "bypassPermissions",
+                             "dontAsk", "auto"], default="default",
+                    help="agent 权限模式（默认 default）：default=需要权限的工具弹权限请求；"
+                         "敏感操作按人格【询问】走语音确认；bypassPermissions=全放行（危险）。"
+                         "预允许/拒绝的工具用 assistant 目录的配置或 .mcp.json 控制")
     ap.add_argument("--live2d-port", type=int, default=None,
                     help="live2d 桌宠联动端口（如 5000，desktop_pet.py --control-port）：LLM "
                          "心态→切表情，且**所有**送 TTS 的文本→头顶说话框（对话回复/就绪语/"
@@ -299,17 +319,34 @@ def main():
         sys.exit(1)
     print("麦克风信号正常（RMS %.1f dBFS）" % (20 * np.log10(rms + 1e-12)), flush=True)
 
-    # ---- LLM（读 --llm-config 指定文件 / 默认 config.local.json / 环境变量 / CLI）----
+    # ---- 大脑：llm 模式（现有 OpenAI 兼容客户端）/ agent 模式（本地 claude 常驻会话）----
+    # agent 模式旁路自实现历史/压缩/系统提示词（上下文在 claude 会话，人格=agent 目录
+    # CLAUDE.md 显式传 system_prompt），详见 docs/agent-integration.md。
     system_prompt = None
-    if args.system_prompt:
-        with open(args.system_prompt, "r", encoding="utf-8") as f:
-            system_prompt = f.read()
-    llm = OpenAICompatibleClient(config_path=args.llm_config,
-                                 api_key=args.api_key, base_url=args.base_url,
-                                 model=args.llm_model)
-    masked = (llm._api_key[:4] + "…" + llm._api_key[-4:]) if len(llm._api_key) > 8 else "***"
-    print("LLM: %s / %s（key %s，读 %s，不提交 git）"
-          % (llm._base_url, llm._model, masked, llm.config_path), flush=True)
+    llm = None
+    agent = None
+    if args.brain == "agent":
+        agent_dir = args.agent_dir or os.path.join(_PROJ, "assistant")
+        agent = ClaudeAgentClient(
+            cwd=agent_dir,
+            resume=args.agent_resume,
+            model=args.agent_model,
+            permission_mode=args.agent_permission_mode,
+            debug=args.debug,
+        )
+        print("[agent] 大脑=本地 claude 常驻会话（dir=%s%s）"
+              % (agent_dir, "，续上次会话" if args.agent_resume else "，新会话"),
+              flush=True)
+    else:
+        if args.system_prompt:
+            with open(args.system_prompt, "r", encoding="utf-8") as f:
+                system_prompt = f.read()
+        llm = OpenAICompatibleClient(config_path=args.llm_config,
+                                     api_key=args.api_key, base_url=args.base_url,
+                                     model=args.llm_model)
+        masked = (llm._api_key[:4] + "…" + llm._api_key[-4:]) if len(llm._api_key) > 8 else "***"
+        print("LLM: %s / %s（key %s，读 %s，不提交 git）"
+              % (llm._base_url, llm._model, masked, llm.config_path), flush=True)
 
     # ---- 引擎 ----
     interrupt_words = [w.strip() for w in args.interrupt_words.split(",") if w.strip()] or None
@@ -352,7 +389,13 @@ def main():
                               merge_window=args.merge_window / 1000.0,
                               post_commit_window=args.post_commit_window / 1000.0,
                               max_context_tokens=args.max_context_tokens,
-                              mood_marker=args.mood_marker)
+                              mood_marker=args.mood_marker,
+                              agent=agent)
+    if agent is not None:
+        ctrl.set_agent(agent)     # 接管 agent 结果/流式回调（须在 agent.start() 前）
+        agent.start()             # 冷启动连接 claude（阻塞到连上；之后常驻随时可问）
+        print("[agent] 大脑就绪（session=%s，cwd=%s）"
+              % (agent.session_id, agent.cwd), flush=True)
     if idle_tts is not None:
         idle_tts.set_active_check(lambda: ctrl.turn_active)   # 判"真实播完"需 controller
 
@@ -453,9 +496,9 @@ def main():
         wake.on_sleep = lambda _reason: live2d.reset()
     # 注意 on_ai_delta 由 LLM 线程回调，控制台写入线程安全（单写者串行 + 锁由 controller 保证时序）
 
-    print("就绪！开始对话（Ctrl+C 退出）。打断词=%s，回声门控=%s，VAD尾长=%dms，"
+    print("就绪！开始对话（Ctrl+C 退出）。大脑=%s，打断词=%s，回声门控=%s，VAD尾长=%dms，"
           "post-commit窗口=%dms，回声防护=%dms"
-          % (interrupt_words, "开" if args.echo_gate else "关", args.vad_tail,
+          % (args.brain, interrupt_words, "开" if args.echo_gate else "关", args.vad_tail,
              args.post_commit_window, args.echo_guard),
           flush=True)
 

@@ -51,6 +51,40 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
   「休眠 / 唤醒 / 退出」。要恢复"启动即对话"旧行为：`--wake-word ""`。
   更多参数见下文「参数详解」。
 
+## agent 大脑（--brain agent，可选项）
+
+默认 `--brain llm` 用上面的 LLM 引擎（DeepSeek/llmx，**零改动**）。`--brain agent` 则把大脑
+换成**本地 claude code**（`claude-agent-sdk` 常驻会话）：说话 → ASR → 提交给 agent →
+取**最终结论** → TTS。中间的工具调用/思考文本不进 TTS。设计文档 `docs/agent-integration.md`。
+
+**用法**（无需配 LLM key；首次需联网装 SDK，运行期常驻零冷启动）：
+
+```bash
+PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --brain agent
+```
+
+- **人格** = `assistant/CLAUDE.md`（agent 工作目录默认 `repo 根/assistant/`，`--agent-dir` 可换）。
+  它同时被显式读作 `system_prompt`（SDK 实测**不会**自动加载 cwd 的 CLAUDE.md）——改人格就改它。
+  工程规范（根 CLAUDE.md）与对话人格互不干扰。
+- **上下文在 claude 会话里**：自实现的**历史保存/会话压缩/系统提示词全旁路**，claude 自己管理
+  并自动压缩历史。对话期间只允许这一个上下文，从启动到退出不换。
+- **「停下」= ESC**：经 KWS 旁路命中 → `agent.abort()`（等价交互式 claude 按 ESC），
+  立即中断当前回合、**进程/会话/历史全存活**，**绝不杀进程换上下文**；「停下」本身不进
+  agent 上下文。打断后下一句全新 query。
+- **权限【询问】**：敏感操作（开灯/执行命令/写文件等）agent 会带 `【询问】` 标记先征求同意——
+  标记照常播出去问（括号本身不念），你**口头回答后** agent 在同一上下文继续执行并汇报。
+  v1 的权限边界 = `assistant/CLAUDE.md` 人格规则 + 权限模式/工具清单。
+- **续上次会话** `--agent-resume`（对应 `claude -c`）：session_id 落盘在
+  `sessions/agent_session_id.txt`（已 gitignore），重启带它续上次上下文；不带则新建会话
+  （旧的仍在，随时可再续）。中途崩溃也可续（每次启动前落盘）。
+- **权限模式** `--agent-permission-mode`（默认 `default`）：`bypassPermissions`=全放行（危险，
+  别乱用）；预允许/拒绝的工具用 `allowed_tools`/`disallowed_tools` 或 assistant 目录配置控制。
+- **agent 能力**：`assistant/.mcp.json` + `assistant/skills/`（骨架已建，按需填 MCP 服务/技能）。
+- 本地会话存档（`sessions/*.json`）agent 模式**仍保留**（审计用，额外带 agent_session_id），
+  与 claude 侧会话并存。
+- 控制台同样有流式出字（agent 模式从 partial 增量走，TTS 仍只取最终结论）与
+  `→ LLM 请求中…` / `× LLM 出错` 状态行。
+
 ## 架构：线程模型与时序
 
 单进程、**全链路非阻塞**：主线程只负责采麦克风，识别 / LLM / TTS 各在独立线程干活。

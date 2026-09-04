@@ -87,6 +87,15 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `config.local.json` > 环境变量 `DEEPSEEK_API_KEY`（`--llm-config` 可换整份配置）。
 - **自定义系统提示词**：`--system-prompt <文件>`。系统提示词**永不压缩、永远放消息最前**
   （`_build_messages_locked` 把它作 system role，摘要拼在其后、历史之前）。
+- **agent 大脑（可选）**：`--brain agent` 把大脑换成**本地 claude code 常驻会话**
+  （`dialogue/agent.py` `ClaudeAgentClient`，claude-agent-sdk）——旁路自实现历史/压缩/
+  系统提示词（上下文在 claude 会话，人格=`assistant/CLAUDE.md` 显式传 system_prompt，
+  SDK 实测不自动加载 cwd 的 CLAUDE.md）；「停下」=ESC（abort 不 kill 进程，不进上下文）；
+  敏感操作走 `【询问】` 语音确认（`_ASK_RE` 送 TTS 剥掉不念）；`--agent-resume` 续上次会话
+  （session_id 落盘 `sessions/agent_session_id.txt`）。默认 `--brain llm` 时现有 LLM 集成
+  **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自
+  SDK `StreamEvent.content_block_delta.text_delta`（不是 AssistantMessage）；多轮 query 间
+  须 drain 到 ResultMessage 再发下一条（打断残留消息会污染下一轮 receive）。
 - **本地会话存档（默认开）**：`--history-dump` / `--history-dump-dir`（默认 `sessions/`，
   已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把 `ctrl.snapshot()` 的
   **完整对话状态**（system+summary+history+进行中内容）原子覆盖写到
@@ -188,12 +197,16 @@ asr/
 ├── whisper/     WhisperBackend（可选高精度，离线非流式，本地缓存路径加载）
 └── sherpa/      SherpaBackend（CPU 轻量基线，sherpa-onnx zipformer）
 dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + compress）/
-                 controller.py（DialogueController：barge-in/hard_stop/tts_busy/hold-off/历史压缩）/
+                 controller.py（DialogueController：barge-in/hard_stop/tts_busy/hold-off/历史压缩；
+                   agent 参数=agent 模式旁路历史/压缩/系统提示词，【询问】送 TTS 剥掉不念）/
+                 agent.py（ClaudeAgentClient：--brain agent 大脑，claude-agent-sdk 常驻会话，
+                   abort()=ESC、session_id 落盘、StreamEvent 流式出字）/
                  mic.py（MicAGC/check_mic_signal/pick_input_device）/
                  wake.py（WakeSession：休眠/对话两态状态机，唤醒/退出/静默超时，纯逻辑可测）/
                  live2d.py（Live2dEmitter：心态→表情 + 全 TTS 文本→说话框，启动测活+组合复位）/
                  say_tts.py（SayTTS：tts 代理，文本→说话框逐句链式跟播+一轮播完复位，纯逻辑可测）
                  config.local.json（机密 API key，gitignored，绝不提交）
+assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）
 examples/        transcribe_file / record_mic / demonstrate_interrupt（T12）/ demonstrate_streaming（T13）/
                  use_with_voice0_tts（共享 voice-asr 环境组合 demo）/ voice_dialogue（语音对话主程序）
