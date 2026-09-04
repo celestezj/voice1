@@ -83,7 +83,8 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些参数很难懂，解释时先讲
   直觉（"你停多久算说完""AI 答完但音频没播的空档""回声防护"），别只念数值。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
-  **绝不提交/绝不外传**）；读取优先级 显式参数 > 配置文件 > 环境变量 `DEEPSEEK_API_KEY`。
+  **绝不提交/绝不外传**）；读取优先级 显式参数 > `--llm-config` 指定文件 > 默认
+  `config.local.json` > 环境变量 `DEEPSEEK_API_KEY`（`--llm-config` 可换整份配置）。
 - **自定义系统提示词**：`--system-prompt <文件>`。系统提示词**永不压缩、永远放消息最前**
   （`_build_messages_locked` 把它作 system role，摘要拼在其后、历史之前）。
 - **本地会话存档（默认开）**：`--history-dump` / `--history-dump-dir`（默认 `sessions/`，

@@ -23,6 +23,8 @@
     ```
 
   - 更多引擎（通义/智谱/自写客户端等）见 `docs/EXTENDING-BACKENDS.md`。
+  - 想换整份配置（多套服务商/测试配置）而**不动** `config.local.json`：`--llm-config <路径>`
+    （默认 `dialogue/config.local.json`；`--llm-model/--base-url/--api-key` 仍可单独覆盖）。
 - 中文输出必须加 `PYTHONIOENCODING=utf-8`（Windows GBK 终端会乱码/报错）。
 
 **推荐启动**（GPU 机器）：

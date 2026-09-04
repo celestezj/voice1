@@ -5,7 +5,8 @@
 break/关闭（打断）时自动关闭连接——这是 barge-in 能立刻切断 LLM 吐词的基础。
 
 机密配置（API key）放 `dialogue/config.local.json`（已在 .gitignore 里，**绝不
-提交**）。读取优先级：显式参数 > config.local.json > 环境变量 DEEPSEEK_API_KEY。
+提交**；`--llm-config <路径>` 可换成别的配置文件）。读取优先级：显式参数 >
+`--llm-config` 指定文件 > 默认 config.local.json > 环境变量 DEEPSEEK_API_KEY。
 """
 import json
 import os
@@ -56,8 +57,12 @@ class OpenAICompatibleClient(LLMClient):
     """
 
     def __init__(self, api_key=None, base_url=None, model=None, temperature=0.7,
-                 max_tokens=None, connect_timeout=10, read_timeout=120):
-        cfg = load_config()
+                 max_tokens=None, connect_timeout=10, read_timeout=120,
+                 config_path=None):
+        cfg = load_config(config_path)   # None → 默认 dialogue/config.local.json
+        self.config_path = (config_path
+                            or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            "config.local.json"))
         self._api_key = api_key or cfg.get("api_key") \
             or os.environ.get("DEEPSEEK_API_KEY", "")
         if not self._api_key:

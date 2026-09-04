@@ -47,7 +47,8 @@ post-commit barge 已接管续句打断，hold 只保护首句边界后 0.35s �
 线程调 LLM 压缩旧历史为摘要（最近 6 条原样保留）。
 
 机密：API key 放 `dialogue/config.local.json`（已 gitignore，**绝不提交**），
-或环境变量 DEEPSEEK_API_KEY，或 `--api-key`。
+或环境变量 DEEPSEEK_API_KEY，或 `--api-key`；整个配置文件可用
+`--llm-config <路径>` 换成别的文件（如多套服务商/测试配置）。
 
 用法（中文输出需 UTF-8）：
     PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py [--asr-device cuda] [--tts-device cuda]
@@ -205,6 +206,9 @@ def main():
     ap.add_argument("--llm-model", default=None, help="LLM 模型名（默认 config.local.json 或 deepseek-chat）")
     ap.add_argument("--base-url", default=None, help="LLM base_url（默认 config.local.json 或 https://api.deepseek.com）")
     ap.add_argument("--api-key", default=None, help="LLM API key（默认 config.local.json 或 DEEPSEEK_API_KEY）")
+    ap.add_argument("--llm-config", default=None,
+                    help="LLM 配置文件路径（默认 dialogue/config.local.json）；"
+                         "--llm-model/--base-url/--api-key 仍可单独覆盖")
     ap.add_argument("--interrupt-words", default="停下",
                     help="打断词（逗号分隔，默认\"停下\"）：命中即终止 LLM+TTS 输出")
     ap.add_argument("--reply-hold", type=float, default=0.0,
@@ -295,16 +299,17 @@ def main():
         sys.exit(1)
     print("麦克风信号正常（RMS %.1f dBFS）" % (20 * np.log10(rms + 1e-12)), flush=True)
 
-    # ---- LLM（读 config.local.json / 环境变量 / CLI）----
+    # ---- LLM（读 --llm-config 指定文件 / 默认 config.local.json / 环境变量 / CLI）----
     system_prompt = None
     if args.system_prompt:
         with open(args.system_prompt, "r", encoding="utf-8") as f:
             system_prompt = f.read()
-    llm = OpenAICompatibleClient(api_key=args.api_key, base_url=args.base_url,
+    llm = OpenAICompatibleClient(config_path=args.llm_config,
+                                 api_key=args.api_key, base_url=args.base_url,
                                  model=args.llm_model)
     masked = (llm._api_key[:4] + "…" + llm._api_key[-4:]) if len(llm._api_key) > 8 else "***"
-    print("LLM: %s / %s（key %s，读本地配置文件，不提交 git）"
-          % (llm._base_url, llm._model, masked), flush=True)
+    print("LLM: %s / %s（key %s，读 %s，不提交 git）"
+          % (llm._base_url, llm._model, masked, llm.config_path), flush=True)
 
     # ---- 引擎 ----
     interrupt_words = [w.strip() for w in args.interrupt_words.split(",") if w.strip()] or None

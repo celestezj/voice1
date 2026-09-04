@@ -27,4 +27,5 @@ __pycache__/
 
 # 本地机密配置（LLM API key 等，绝不入库）
 dialogue/config.local.json
+dialogue/llm.config.local.json
 dialogue/user_prompt.txt
