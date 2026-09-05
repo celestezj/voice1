@@ -10,10 +10,11 @@
 
 ## 快速上手（安装 → 使用）
 
-1. **环境**：先 `conda activate voice-asr` 再跑 `python`。**若本地已有 voice0 的 `voice-tts`
-   虚拟环境，则优先直接用它（不再新建 voice-asr）**——两个项目的基座是一样的，缺失的依赖
-   直接装进 voice-tts 即可（torch 2.11+cu126 等，缺啥装啥）。`voice-asr` 只是"没有
-   voice-tts 时"新建的专用环境名（原从 voice-tts 克隆、是它的严格超集）；克隆出的专用环境
+1. **环境**：先 `conda activate voice-asr` 再跑 `python`。**优先使用 `voice-asr`**（它是
+   voice-tts 的严格超集，含全部 ASR + agent 依赖如 `claude_agent_sdk`）；**仅当本地只有
+   `voice-tts`（voice0 共享基座）时**才用 voice-tts 并就地补装缺失依赖——**不必新建
+   voice-asr**。三态判定：两者都有→voice-asr；只有 voice-asr→voice-asr；只有
+   voice-tts→voice-tts（缺啥装啥，torch 2.11+cu126 等）。voice-asr 原从 voice-tts 克隆，
    如遇版本冲突在其内单独重装，**不碰 voice0 的 voice-tts 环境**。
 2. **权重预下载**（仅首次联网，之后运行期零网络）：`python preload_asr.py`。
 3. **跑起来**（中文输出加 `PYTHONIOENCODING=utf-8`）：
@@ -33,13 +34,15 @@
 
 ## 环境硬性约束（新 Claude Code 接手必须先知道）
 
-- **Python 必须用 `voice-asr` / `voice-tts` conda 环境**：先 `conda activate voice-asr`（若本地
-  已有 voice0 的 `voice-tts` 则优先 `conda activate voice-tts`）再跑 `python`；base Python 3.12
-  无 torch。**后续文档/代码里凡提到 `voice-asr`，要知道并不是该环境不存在——而是可能实际用的
-  是 voice-tts 环境替代（两环境同基座、二选一，缺依赖就地补装）**。
+- **Python 必须用 `voice-asr` / `voice-tts` conda 环境，`voice-asr` 优先**：先
+  `conda activate voice-asr`；**仅当本地没有 voice-asr（只有 voice0 的 voice-tts）时才
+  `conda activate voice-tts`**——二选一、缺依赖就地补装，**绝不新建 voice-asr**。base
+  Python 3.12 无 torch。**后续文档/代码里凡提到 `voice-asr`，要知道环境判定的三态：两者都有
+  →voice-asr；只有 voice-asr→voice-asr；只有 voice-tts→voice-tts 替代（voice-asr 是
+  voice-tts 的严格超集，含 agent 依赖如 `claude_agent_sdk`，所以优先它）**。
 - **跑带中文输出的命令加 `PYTHONIOENCODING=utf-8`**：Windows 默认 GBK 会直接崩。
 - **权重/缓存重定向到项目内 `.cache/`**（`HF_HOME`/`HF_ENDPOINT`/`MODELSCOPE_CACHE` 在模块里已设好）；首次下载走 `HF_ENDPOINT=https://hf-mirror.com` 镜像（huggingface.co 直连被墙）。
-- git 仓库根即本目录（独立仓库，**不含 voice0 内容**；`third_party/` 是 gitignored 的上游 clone，别在里面提交）。GitHub 地址：https://github.com/celestezj/voice1。新用户一键安装：`python setup_env.py`（复用 voice0 脚本建 voice-tts 底座 → 克隆出 voice0/voice1 共用的唯一环境 voice-asr → 装 ASR 依赖 → preload 权重 → 验证）。**本地已自带 voice0 的 `voice-tts` 环境时不用走克隆——直接在 voice-tts 里补装缺失依赖即可（同基座）。**
+- git 仓库根即本目录（独立仓库，**不含 voice0 内容**；`third_party/` 是 gitignored 的上游 clone，别在里面提交）。GitHub 地址：https://github.com/celestezj/voice1。新用户一键安装：`python setup_env.py`（复用 voice0 脚本建 voice-tts 底座 → 克隆出 voice0/voice1 共用的唯一环境 voice-asr → 装 ASR 依赖 → preload 权重 → 验证）。**本地已有 voice0 的 `voice-tts` 且无 voice-asr 时，直接用 voice-tts 就地补装缺失依赖（同基座），不必克隆新建 voice-asr。**
 - **`voice-asr` 也是 voice0(TTS) 的运行环境（两项目共享，实测 2026-08-28）**：voice-asr 当初从 voice-tts 克隆，是 voice-tts 的**严格超集**（等价地，直接在 voice-tts 里补装 ASR 依赖后也可作 voice1 运行环境，见上「环境安装」）——voice0 的 melo 后端（`from melo.api import TTS`，导入名是 `melo` 不是 `MeloTTS`）在 voice-asr 可直接跑（合成冒烟通过）。同进程组合示例见 `examples/use_with_voice0_tts.py`（TTS→ASR→TTS 闭环）。**组合时 HF_HOME 是唯一可能冲突的环境变量**：melo 用 voice0/.cache/hf，voice1 仅 whisper 后端才用 HF_HOME（默认 paraformer 走 MODELSCOPE_CACHE，无冲突）——显式播种见该示例。**cosy 后端不能与 melo/ASR 同进程**（voice0 设计约束：cosy 注入 transformers 4.51.3，与主环境 4.57.6 冲突，须独立子进程）。
 
 ## 关键坑（非显而易见的，先看再动）
@@ -84,6 +87,11 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --system-prompt dialogue/user_prompt.txt`
   （`--vad-tail 300` 比默认 600 每轮首包快 300ms；残句由 post-commit barge 兜底，停顿多
   就调回 600）
+- **一键启动脚本** `start_dialogue.bat [llm|agent] [额外参数...]`：默认不传 = **llm** 接入；
+  `start_dialogue.bat agent` = **agent** 接入（本地 claude 常驻会话，`--brain agent`），
+  **若 `sessions/agent_session_id.txt` 已有历史则自动加 `--agent-resume` 续上次会话**，
+  无则新建；llm 模式自动带 `--llm-config dialogue\config.local.json`（agent 模式不带），
+  其余参数原样透传（如 `start_dialogue.bat agent --vad-tail 600`）。
 - **参数含义白话版 + 快速开始 + 架构时序图**（vad-tail / post-commit-window / echo-guard /
   merge-window 的直觉 + 时间线 + 校准 + mermaid 线程时序）：见
   [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些参数很难懂，解释时先讲
