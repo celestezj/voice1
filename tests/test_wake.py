@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """WakeSession 状态机 + sherpa 关键词文件唯一化 测试（无麦克风 / 无真实 TTS）。
 
-跑法：D:/anaconda/envs/voice-asr/python.exe tests/test_wake.py
+跑法：conda activate voice-tts（共用 voice0 基座，缺失回退 voice-asr）后：python tests/test_wake.py
 覆盖：
   1   默认：有唤醒词 → 启动休眠；无唤醒词 → 启动即对话（旧行为）
   2   on_wake：休眠→对话 + 返回就绪语；重复调用幂等（None）

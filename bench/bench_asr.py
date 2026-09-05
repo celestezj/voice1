@@ -88,7 +88,7 @@ def run(backend, device, tag, tail=250):
     rows, total_dur, total_wall = [], 0.0, 0.0
     ttfb_all, cs, cn, cnt = [], 0.0, 0.0, 0
     for entry in manifest:
-        ref, wav = entry["text"], entry["wav"]
+        ref, wav = entry["text"], os.path.join(_ROOT, entry["wav"])
         dur = wav_dur(wav)
         t0 = time.time()
         res = asr.ingest_file(wav)

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Live2dEmitter（emotion 表情 + say 说话框 + reset 组合复位）+ wake.on_sleep 复位联动 测试。
 
-跑法：PYTHONIOENCODING=utf-8 D:/anaconda/envs/voice-asr/python.exe tests/test_live2d.py
+跑法：conda activate voice-tts（共用 voice0 基座，缺失回退 voice-asr）后：PYTHONIOENCODING=utf-8 python tests/test_live2d.py
 覆盖：
   1   port=None → 不启用（enabled=False，无 worker、不尝试连接）
   2   测活成功 → enabled=True，且构造即同步收到恢复初始状态 {"emotion":null,"say":null}

@@ -319,7 +319,8 @@ whisper 自带 segment 时间戳只取窗口后段**新增**文本（重叠旧�
 
 ### 需求缘起（同音字是纯音频歧义）
 
-`E:\temp\语音包\xiaoshuang.mp3`（里尔克《给青年诗人的信》节选）paraformer 流式输出错误：
+`assets/hotwords/xiaoshuang.mp3`（里尔克《给青年诗人的信》节选，样本已拷入本仓库但
+`.gitignore` 忽略不入库，新机器复现需自备该音频）paraformer 流式输出错误：
 神庙/新天/四十/与。同音字 神庙↔神妙 拼音同为 `shenmiao`，纯声学上不可区分——NAT（paraformer）
 与自回归（whisper）的声学先验都不足以解决，必须引入**词汇先验**（热词偏置）。
 

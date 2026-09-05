@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """SayTTS 逐句链式跟播 + 一轮播完自动复位 测试（假 TTS/Job，无 voice0 / 无 live2d）。
 
-跑法：PYTHONIOENCODING=utf-8 D:/anaconda/envs/voice-asr/python.exe tests/test_say_tts.py
+跑法：conda activate voice-tts（共用 voice0 基座，缺失回退 voice-asr）后：PYTHONIOENCODING=utf-8 python tests/test_say_tts.py
 覆盖（重点回归"多句抢发"缺陷：queue 模式下音频串行，气泡文本必须逐句跟播）：
   1  单句：提交即发文本；播完 + 无在途 → idle_cb（自动复位）恰好一次
   2  三句连发（原 bug）：提交瞬间只发第 1 句，第 2 句等第 1 句播完才发，

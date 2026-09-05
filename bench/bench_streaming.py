@@ -41,7 +41,7 @@ CHUNK = int(SR * 0.1)              # 100ms
 
 def _load_corpus():
     with open(os.path.join(CORPUS, "manifest.json"), "r", encoding="utf-8") as f:
-        return [(e["text"], e["wav"]) for e in json.load(f)]
+        return [(e["text"], os.path.join(_ROOT, e["wav"])) for e in json.load(f)]
 
 
 def _read(path):
