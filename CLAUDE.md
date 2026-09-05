@@ -102,11 +102,12 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自
   SDK `StreamEvent.content_block_delta.text_delta`（不是 AssistantMessage）；多轮 query 间
   须 drain 到 ResultMessage 再发下一条（打断残留消息会污染下一轮 receive）。
-- **本地会话存档（默认开）**：`--history-dump` / `--history-dump-dir`（默认 `sessions/`，
-  已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把 `ctrl.snapshot()` 的
-  **完整对话状态**（system+summary+history+进行中内容）原子覆盖写到
+- **本地会话存档（默认开，仅 LLM 模式）**：`--history-dump` / `--history-dump-dir`（默认
+  `sessions/`，已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把
+  `ctrl.snapshot()` 的**完整对话状态**（system+summary+history+进行中内容）原子覆盖写到
   `session_<启动时间戳>.json`（每次启动新建；退出再写一次）。后台线程写盘，`snapshot()`
-  锁内只浅拷贝、IO 在锁外——**不阻塞 LLM 线程**。
+  锁内只浅拷贝、IO 在锁外——**不阻塞 LLM 线程**。**agent 模式不写**（历史在 claude 会话里，
+  claude 自己管理，只落 `sessions/agent_session_id.txt` 供 `--agent-resume` 续）。
 - **打断（barge-in）**：LLM 在途时来新 ASR 句 → `gen` 代际 +1 弃流（生成器 close 关连接），
   **重发本轮累计**（句1+句2…）；被作废的回复不 commit 历史。
 - **停用词"停下"**：`--interrupt-words`（默认"停下"）。KWS 旁路命中 → `interrupt()` →

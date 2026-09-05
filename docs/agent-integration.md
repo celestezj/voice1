@@ -79,7 +79,8 @@
 | 旁路内容 | —— | 历史/压缩/系统提示词全部旁路 |
 
 agent 模式下 controller 瘦身为：**ASR 句 → 提交 → 等最终结论 → TTS**。
-本地会话存档（`sessions/*.json`）建议**仍保留**（审计），与 claude 侧会话并存。
+**本地会话存档（`sessions/*.json`）agent 模式不写**——历史/压缩在 claude 会话里由 claude 自己
+管理，只落一个 `sessions/agent_session_id.txt` 供 `--agent-resume` 续会话（见「重启续上次会话」）。
 
 ## 打断（「停下」= ESC）
 

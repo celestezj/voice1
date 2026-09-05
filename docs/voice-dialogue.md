@@ -240,6 +240,9 @@ sequenceDiagram
 
 ## 会话历史存档（本地记录，默认开）
 
+> **仅 LLM 模式**：`--brain agent` 时不写本地存档——历史/压缩在 claude 会话里由 claude 自己
+> 管理（重启用 `--agent-resume` 续），只落 `sessions/agent_session_id.txt`。
+
 每 `--history-dump-interval` 秒（默认 **300**=5 分钟）把**完整对话状态**覆盖写到一个
 本地 JSON 文件：系统提示词 + 压缩摘要 + 全部已 commit 轮次 + 正在进行未提交的内容。
 

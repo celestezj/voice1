@@ -505,10 +505,15 @@ def main():
           flush=True)
 
     # ---- 本地会话存档（后台线程，每 interval 覆盖写；不阻塞 LLM/识别/TTS）----
+    # 仅 LLM 模式需要：agent 模式历史/压缩在 claude 会话里（claude 自己管），
+    # 不写本地存档，只落 session_id 供 --agent-resume 续会话
     dump_path = None
     dump_stop = threading.Event()
     dumper_thread = None
-    if args.history_dump and args.history_dump_dir:
+    if args.brain == "agent":
+        print("会话存档：agent 模式不写本地存档（历史在 claude 会话，重启 --agent-resume 续）",
+              flush=True)
+    elif args.history_dump and args.history_dump_dir:
         os.makedirs(args.history_dump_dir, exist_ok=True)
         dump_path = os.path.join(args.history_dump_dir,
                                  "session_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
