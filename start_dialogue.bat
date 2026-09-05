@@ -8,7 +8,28 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 echo [info] work dir: %SCRIPT_DIR%
 
-:: 2. conda env name: 默认 voice-asr，conda 定位后自动改选共用 voice-tts（见 CLAUDE.md 环境政策）
+:: 1b. brain 模式：start_dialogue.bat [llm|agent] [voice_dialogue 额外参数...]
+::    默认不传 = llm（现状零改动）；agent = 本地 claude 常驻会话
+set "BRAIN=llm"
+if /i "%1"=="agent" (
+    set "BRAIN=agent"
+    shift
+) else if /i "%1"=="llm" (
+    set "BRAIN=llm"
+    shift
+)
+echo [info] brain: %BRAIN%
+
+:: 收集其余参数原样透传给 voice_dialogue.py
+set "EXTRA="
+:extra_loop
+if "%1"=="" goto extra_done
+set "EXTRA=%EXTRA% %1"
+shift
+goto extra_loop
+:extra_done
+
+:: 2. conda env name: 默认 voice-asr，conda 定位后自动探测（优先 voice-asr，缺失回退 voice-tts）
 set "CONDA_ENV=voice-asr"
 
 set "CONDA_ROOT="
@@ -88,12 +109,13 @@ if not exist "!CONDA_ROOT!\Scripts\activate.bat" (
 echo [ok] Anaconda root: !CONDA_ROOT!
 set "CONDA_ACTIVATE=!CONDA_ROOT!\Scripts\activate.bat"
 
-:: 3. conda env：优先共用 voice-tts（voice0 基座，缺依赖直接在该环境装，见 CLAUDE.md），
-::    缺失才用 voice-asr。CONDA_ROOT 已定位，直接探测 python.exe 是否存在。
-if exist "!CONDA_ROOT!\envs\voice-tts\python.exe" (
-    set "CONDA_ENV=voice-tts"
-) else (
+:: 3. conda env：**优先 voice-asr**（voice-tts 的严格超集，含全部 ASR + agent 依赖如
+::    claude_agent_sdk）；缺失才用 voice-tts（共享 voice0 基座，缺依赖就地补装）；
+::    绝不新建 voice-asr。CONDA_ROOT 已定位，直接探测 python.exe 是否存在。
+if exist "!CONDA_ROOT!\envs\voice-asr\python.exe" (
     set "CONDA_ENV=voice-asr"
+) else (
+    set "CONDA_ENV=voice-tts"
 )
 echo [info] conda env: !CONDA_ENV!
 
@@ -119,7 +141,22 @@ echo  Exit: Ctrl + C
 echo ==============================================
 echo.
 
-python examples\voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt --llm-config dialogue\config.local.json --tts-normalize rms --live2d-port 5000 %*
+:: 5. brain 模式相关参数：llm 走本地配置；agent 有本地历史则续上次会话
+set "LLMCFG=--llm-config dialogue\config.local.json"
+set "AGENT_RESUME="
+if "%BRAIN%"=="agent" (
+    set "LLMCFG="
+    if exist "sessions\agent_session_id.txt" set "AGENT_RESUME=--agent-resume"
+    if defined AGENT_RESUME (
+        echo [info] agent: 检测到本地 claude 历史，续上次会话
+    ) else (
+        echo [info] agent: 无本地会话历史，将新建会话
+    )
+)
+
+set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %EXTRA%"
+echo [run] %CMD%
+%CMD%
 
 echo.
 echo -------- dialogue ended, press any key to close --------
