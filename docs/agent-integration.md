@@ -147,6 +147,17 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
   `_build_messages` 在 agent 模式整条旁路（`self._agent is not None` 早退）。
 - **「停下」/ barge 的 abort 顺序**：controller 先 `_gen += 1`（快路径状态清理），锁外再
   `agent.abort()`（ESC）。下一句提交时 worker 已 drain 干净，无残留消息污染。
+- **权限模式实测（2026-09-04，probe_perm_*.py）**：SDK 流式场景下 claude 是**无终端**运行，
+  权限弹窗没人能答——`permission_mode="default"` 时未预允许的工具**直接自动拒绝**
+  （CLI 发 `system(subtype=permission_denied)`，agent 正常汇报失败，**不挂起不崩溃**）。
+  无害只读命令（如 `echo`）在 default 下会被自动放行。推论：
+  - `default`（默认）= 语音场景的安全硬兜底：agent 想干未预允许的危险事会被硬门挡住；
+  - 但「语音允许 → agent 真执行」在 default 下**走不通**（硬门无视语音同意，仍自动拒绝）——
+    要让【询问】→用户口头同意→真正执行成立，需对目标工具**预允许**
+    （`allowed_tools` 白名单，此时不触发硬门，agent 可直接跑）或
+    `acceptEdits`（仅自动接受文件编辑）/ `bypassPermissions`（全放行，危险）。
+    v1 推荐姿势：把想真正放行的**具体工具**列进 `allowed_tools`（如开灯的 MCP 工具），
+    其余保持 default 自动拒绝兜底；【询问】变成"用预允许工具前的社交许可层"。
 
 ## 技术风险 / 待验证点
 

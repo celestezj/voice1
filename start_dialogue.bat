@@ -8,9 +8,8 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 echo [info] work dir: %SCRIPT_DIR%
 
-:: 2. conda env name (edit this line to switch)
+:: 2. conda env name: 默认 voice-asr，conda 定位后自动改选共用 voice-tts（见 CLAUDE.md 环境政策）
 set "CONDA_ENV=voice-asr"
-echo [info] conda env: %CONDA_ENV%
 
 set "CONDA_ROOT="
 
@@ -89,6 +88,15 @@ if not exist "!CONDA_ROOT!\Scripts\activate.bat" (
 echo [ok] Anaconda root: !CONDA_ROOT!
 set "CONDA_ACTIVATE=!CONDA_ROOT!\Scripts\activate.bat"
 
+:: 3. conda env：优先共用 voice-tts（voice0 基座，缺依赖直接在该环境装，见 CLAUDE.md），
+::    缺失才用 voice-asr。CONDA_ROOT 已定位，直接探测 python.exe 是否存在。
+if exist "!CONDA_ROOT!\envs\voice-tts\python.exe" (
+    set "CONDA_ENV=voice-tts"
+) else (
+    set "CONDA_ENV=voice-asr"
+)
+echo [info] conda env: !CONDA_ENV!
+
 :: 4. activate env
 call "!CONDA_ACTIVATE!" "!CONDA_ROOT!"
 call conda activate "!CONDA_ENV!"
@@ -96,8 +104,8 @@ call conda activate "!CONDA_ENV!"
 :: python output needs UTF-8 (default GBK would crash it)
 set "PYTHONIOENCODING=utf-8"
 
-:: verify we are really in voice-asr (warn if not)
-python -c "import sys; sys.exit(0 if 'voice-asr' in sys.executable else 1)" >nul 2>nul
+:: verify we are really in the target conda env (warn if not)
+python -c "import sys; sys.exit(0 if '%CONDA_ENV%' in sys.executable else 1)" >nul 2>nul
 if errorlevel 1 (
     echo [error] python not in %CONDA_ENV%, check env name / conda
     pause

@@ -10,8 +10,11 @@
 
 ## 快速上手（安装 → 使用）
 
-1. **环境**：先 `conda activate voice-asr`（从 `voice-tts` 克隆，含 torch 2.11+cu126）再跑 `python`；
-   克隆后如遇版本冲突在 voice-asr 内单独重装，**不碰 voice0 的 voice-tts 环境**。
+1. **环境**：先 `conda activate voice-asr` 再跑 `python`。**若本地已有 voice0 的 `voice-tts`
+   虚拟环境，则优先直接用它（不再新建 voice-asr）**——两个项目的基座是一样的，缺失的依赖
+   直接装进 voice-tts 即可（torch 2.11+cu126 等，缺啥装啥）。`voice-asr` 只是"没有
+   voice-tts 时"新建的专用环境名（原从 voice-tts 克隆、是它的严格超集）；克隆出的专用环境
+   如遇版本冲突在其内单独重装，**不碰 voice0 的 voice-tts 环境**。
 2. **权重预下载**（仅首次联网，之后运行期零网络）：`python preload_asr.py`。
 3. **跑起来**（中文输出加 `PYTHONIOENCODING=utf-8`）：
    `python examples/transcribe_file.py 音频.wav` —— 文件转写；`python examples/record_mic.py` —— 麦克风实时识别。
@@ -30,11 +33,14 @@
 
 ## 环境硬性约束（新 Claude Code 接手必须先知道）
 
-- **Python 必须用 `voice-asr` conda 环境**：先 `conda activate voice-asr` 再跑 `python`；base Python 3.12 无 torch。
+- **Python 必须用 `voice-asr` / `voice-tts` conda 环境**：先 `conda activate voice-asr`（若本地
+  已有 voice0 的 `voice-tts` 则优先 `conda activate voice-tts`）再跑 `python`；base Python 3.12
+  无 torch。**后续文档/代码里凡提到 `voice-asr`，要知道并不是该环境不存在——而是可能实际用的
+  是 voice-tts 环境替代（两环境同基座、二选一，缺依赖就地补装）**。
 - **跑带中文输出的命令加 `PYTHONIOENCODING=utf-8`**：Windows 默认 GBK 会直接崩。
 - **权重/缓存重定向到项目内 `.cache/`**（`HF_HOME`/`HF_ENDPOINT`/`MODELSCOPE_CACHE` 在模块里已设好）；首次下载走 `HF_ENDPOINT=https://hf-mirror.com` 镜像（huggingface.co 直连被墙）。
-- git 仓库根即 `E:\temp\voice1`（独立仓库，**不含 voice0 内容**；`third_party/` 是 gitignored 的上游 clone，别在里面提交）。GitHub 地址：https://github.com/celestezj/voice1。新用户一键安装：`python setup_env.py`（复用 voice0 脚本建 voice-tts 底座 → 克隆出 voice0/voice1 共用的唯一环境 voice-asr → 装 ASR 依赖 → preload 权重 → 验证）。
-- **`voice-asr` 也是 voice0(TTS) 的运行环境（两项目共享，实测 2026-08-28）**：voice-asr 当初从 voice-tts 克隆，是 voice-tts 的**严格超集**——voice0 的 melo 后端（`from melo.api import TTS`，导入名是 `melo` 不是 `MeloTTS`）在 voice-asr 可直接跑（合成冒烟通过）。同进程组合示例见 `examples/use_with_voice0_tts.py`（TTS→ASR→TTS 闭环）。**组合时 HF_HOME 是唯一可能冲突的环境变量**：melo 用 voice0/.cache/hf，voice1 仅 whisper 后端才用 HF_HOME（默认 paraformer 走 MODELSCOPE_CACHE，无冲突）——显式播种见该示例。**cosy 后端不能与 melo/ASR 同进程**（voice0 设计约束：cosy 注入 transformers 4.51.3，与主环境 4.57.6 冲突，须独立子进程）。
+- git 仓库根即本目录（独立仓库，**不含 voice0 内容**；`third_party/` 是 gitignored 的上游 clone，别在里面提交）。GitHub 地址：https://github.com/celestezj/voice1。新用户一键安装：`python setup_env.py`（复用 voice0 脚本建 voice-tts 底座 → 克隆出 voice0/voice1 共用的唯一环境 voice-asr → 装 ASR 依赖 → preload 权重 → 验证）。**本地已自带 voice0 的 `voice-tts` 环境时不用走克隆——直接在 voice-tts 里补装缺失依赖即可（同基座）。**
+- **`voice-asr` 也是 voice0(TTS) 的运行环境（两项目共享，实测 2026-08-28）**：voice-asr 当初从 voice-tts 克隆，是 voice-tts 的**严格超集**（等价地，直接在 voice-tts 里补装 ASR 依赖后也可作 voice1 运行环境，见上「环境安装」）——voice0 的 melo 后端（`from melo.api import TTS`，导入名是 `melo` 不是 `MeloTTS`）在 voice-asr 可直接跑（合成冒烟通过）。同进程组合示例见 `examples/use_with_voice0_tts.py`（TTS→ASR→TTS 闭环）。**组合时 HF_HOME 是唯一可能冲突的环境变量**：melo 用 voice0/.cache/hf，voice1 仅 whisper 后端才用 HF_HOME（默认 paraformer 走 MODELSCOPE_CACHE，无冲突）——显式播种见该示例。**cosy 后端不能与 melo/ASR 同进程**（voice0 设计约束：cosy 注入 transformers 4.51.3，与主环境 4.57.6 冲突，须独立子进程）。
 
 ## 关键坑（非显而易见的，先看再动）
 
@@ -179,7 +185,7 @@ voice0 仓库地址：https://github.com/celestezj/voice0
 - headless 测试：`tests/test_wake.py`（**已入库**）——WakeSession 状态机 + sherpa 关键词
   文件唯一化（唤醒/退出/超时/自播门控/幂等）；`tmp/test_dialogue.py`（gitignored）——fake
   LLM/TTS 覆盖切句/barge-in/hold-off/hard_stop/busy/压缩/引擎钩子（`RealtimeASR.__new__`
-  绕过模型加载）。都用 `D:/anaconda/envs/voice-asr/python.exe` 跑。
+  绕过模型加载）。都用 `voice-asr`（或共用 `voice-tts`，见「环境硬性约束」）环境跑。
 
 ## 代码结构
 
