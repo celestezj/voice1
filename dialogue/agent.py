@@ -272,7 +272,10 @@ class ClaudeAgentClient:
                 ev = msg.event
                 if (isinstance(ev, dict) and ev.get("type") == "content_block_delta"):
                     d = ev.get("delta") or {}
-                    if d.get("type") == "text_delta" and d.get("text"):
+                    # 跳过纯空白增量（\n 等）：agent 常逐段吐换行，若不过滤，
+                    # \n 也会触发一次控制台原地刷新 + 换行文本反复重写 = 刷屏
+                    if (d.get("type") == "text_delta" and d.get("text")
+                            and d["text"].strip()):
                         try:
                             self._on_partial(ctx, d["text"])
                         except Exception:

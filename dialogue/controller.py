@@ -599,7 +599,24 @@ class DialogueController:
         n = len(buf)
         if n == 0:
             return None
-        # 1) 最后一个句末边界（.。！？…；\n）
+        # 1) 首个句末边界（.。！？…；\n）——按句切，绝不把多句并成一个 Job。
+        #    旧实现取【最后一个】边界：LLM 流式逐字出字时二者等价；但 agent 模式
+        #    整段回复一次性落地（_on_agent_result 整段塞入 _assistant_buf），
+        #    取末边界会把整段并成一句 TTS，live2d 说话框逐句链式就失去意义
+        #    （实测宋词 163 字整首塌成 1 个 Job）。
+        #    先跳过开头一连串边界字符（\n 换行/句末标点）：agent 输出常以换行分段，
+        #    段首 \n 若被当首边界会因「>=2 字」守卫被拒、回退取末边界再次坍塌。
+        start_idx = 0
+        while start_idx < n and buf[start_idx] in self._BOUNDARY:
+            start_idx += 1
+        first = -1
+        for ch in self._BOUNDARY:
+            i = buf.find(ch, start_idx)
+            if i >= 0 and (first < 0 or i < first):
+                first = i
+        if first >= 0 and len(buf[:first + 1].strip()) >= 2:
+            return first + 1
+        # 1b) 无合格首边界 → 退回取最后一个边界（旧行为，防句中停顿被拆）
         last = -1
         for ch in self._BOUNDARY:
             i = buf.rfind(ch)

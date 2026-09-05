@@ -3,13 +3,13 @@ chcp 65001 >nul
 title voice1 dialogue
 setlocal enabledelayedexpansion
 
-:: 1. script dir = work dir (no hardcoded path)
+rem 1. script dir = work dir (no hardcoded path)
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 echo [info] work dir: %SCRIPT_DIR%
 
-:: 1b. brain 模式：start_dialogue.bat [llm|agent] [voice_dialogue 额外参数...]
-::    默认不传 = llm（现状零改动）；agent = 本地 claude 常驻会话
+rem 1b. brain mode: start_dialogue.bat [llm|agent] [voice_dialogue extra args...]
+rem     no arg = llm (default, unchanged); agent = local claude persistent session
 set "BRAIN=llm"
 if /i "%1"=="agent" (
     set "BRAIN=agent"
@@ -20,7 +20,7 @@ if /i "%1"=="agent" (
 )
 echo [info] brain: %BRAIN%
 
-:: 收集其余参数原样透传给 voice_dialogue.py
+rem collect remaining args, pass through verbatim to voice_dialogue.py
 set "EXTRA="
 :extra_loop
 if "%1"=="" goto extra_done
@@ -29,13 +29,14 @@ shift
 goto extra_loop
 :extra_done
 
-:: 2. conda env name: 默认 voice-asr，conda 定位后自动探测（优先 voice-asr，缺失回退 voice-tts）
+rem 2. conda env name: default voice-asr; probe after locating conda
+rem     (prefer voice-asr, fall back to voice-tts if missing)
 set "CONDA_ENV=voice-asr"
 
 set "CONDA_ROOT="
 
-:: 3. locate conda root (no machine-specific paths)
-:: method1: uninstall registry via PowerShell (custom paths, highest priority)
+rem 3. locate conda root (no machine-specific paths)
+rem method1: uninstall registry via PowerShell (custom paths, highest priority)
 echo [probe1] uninstall registry: find Anaconda/Miniconda...
 for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object {$_.DisplayName -match 'Anaconda|Miniconda'} | Select-Object -First 1 -ExpandProperty InstallLocation" 2^>nul') do (
     set "TEST_ROOT=%%i"
@@ -45,7 +46,7 @@ for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-ItemProperty -Path
     )
 )
 
-:: method2: Anaconda-specific registry keys
+rem method2: Anaconda-specific registry keys
 echo [probe2] Anaconda registry keys...
 set "REG_LIST=HKCU\Software\Continuum\Anaconda HKLM\Software\Continuum\Anaconda HKLM\Software\WOW6432Node\Continuum\Anaconda"
 for %%r in (%REG_LIST%) do (
@@ -58,7 +59,7 @@ for %%r in (%REG_LIST%) do (
     )
 )
 
-:: method3: where conda (needs PATH)
+rem method3: where conda (needs PATH)
 echo [probe3] where conda (PATH)...
 for /f "delims=" %%i in ('where conda 2^>nul') do (
     set "TEST_SCRIPT=%%i"
@@ -71,7 +72,7 @@ for /f "delims=" %%i in ('where conda 2^>nul') do (
     )
 )
 
-:: method4: fallback common install paths
+rem method4: fallback common install paths
 echo [probe4] common install paths...
 for %%p in (
     %USERPROFILE%\anaconda3
@@ -86,11 +87,11 @@ for %%p in (
     )
 )
 
-:: all probes failed: ask user for path (empty = quit)
+rem all probes failed: ask user for path (empty = quit)
 echo.
 echo ########################################################
 echo # All probes failed!
-echo # Enter Anaconda root (e.g. D:naconda), press Enter
+echo # Enter Anaconda root (e.g. D:\anaconda), press Enter
 echo # empty + Enter to quit
 echo ########################################################
 set /p "CONDA_ROOT=Anaconda root:"
@@ -100,7 +101,7 @@ if "!CONDA_ROOT!"=="" (
     exit /b 1
 )
 if not exist "!CONDA_ROOT!\Scripts\activate.bat" (
-    echo [error] Scriptsctivate.bat not found
+    echo [error] Scripts\activate.bat not found
     pause
     exit /b 1
 )
@@ -109,9 +110,10 @@ if not exist "!CONDA_ROOT!\Scripts\activate.bat" (
 echo [ok] Anaconda root: !CONDA_ROOT!
 set "CONDA_ACTIVATE=!CONDA_ROOT!\Scripts\activate.bat"
 
-:: 3. conda env：**优先 voice-asr**（voice-tts 的严格超集，含全部 ASR + agent 依赖如
-::    claude_agent_sdk）；缺失才用 voice-tts（共享 voice0 基座，缺依赖就地补装）；
-::    绝不新建 voice-asr。CONDA_ROOT 已定位，直接探测 python.exe 是否存在。
+rem 3b. conda env: prefer voice-asr (strict superset of voice-tts, includes
+rem     all ASR + agent deps like claude_agent_sdk); use voice-tts only if
+rem     voice-asr missing (shared voice0 base, install deps in place);
+rem     never create voice-asr. CONDA_ROOT is located, probe python.exe.
 if exist "!CONDA_ROOT!\envs\voice-asr\python.exe" (
     set "CONDA_ENV=voice-asr"
 ) else (
@@ -119,14 +121,14 @@ if exist "!CONDA_ROOT!\envs\voice-asr\python.exe" (
 )
 echo [info] conda env: !CONDA_ENV!
 
-:: 4. activate env
+rem 4. activate env
 call "!CONDA_ACTIVATE!" "!CONDA_ROOT!"
 call conda activate "!CONDA_ENV!"
 
-:: python output needs UTF-8 (default GBK would crash it)
+rem python output needs UTF-8 (default GBK would crash it)
 set "PYTHONIOENCODING=utf-8"
 
-:: verify we are really in the target conda env (warn if not)
+rem verify we are really in the target conda env (warn if not)
 python -c "import sys; sys.exit(0 if '%CONDA_ENV%' in sys.executable else 1)" >nul 2>nul
 if errorlevel 1 (
     echo [error] python not in %CONDA_ENV%, check env name / conda
@@ -141,16 +143,16 @@ echo  Exit: Ctrl + C
 echo ==============================================
 echo.
 
-:: 5. brain 模式相关参数：llm 走本地配置；agent 有本地历史则续上次会话
+rem 5. brain-mode args: llm uses local config; agent resumes last session if present
 set "LLMCFG=--llm-config dialogue\config.local.json"
 set "AGENT_RESUME="
 if "%BRAIN%"=="agent" (
     set "LLMCFG="
     if exist "sessions\agent_session_id.txt" set "AGENT_RESUME=--agent-resume"
     if defined AGENT_RESUME (
-        echo [info] agent: 检测到本地 claude 历史，续上次会话
+        echo [info] agent: local claude history found, resuming last session
     ) else (
-        echo [info] agent: 无本地会话历史，将新建会话
+        echo [info] agent: no local session history, starting new session
     )
 )
 

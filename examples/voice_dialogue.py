@@ -56,6 +56,7 @@ post-commit barge 已接管续句打断，hold 只保护首句边界后 0.35s �
 import argparse
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -144,15 +145,62 @@ class _Console:
         self.kind = kind
         self.final = False
 
+    def _term_cols(self):
+        try:
+            cols = shutil.get_terminal_size((80, 20)).columns
+        except Exception:
+            cols = 80
+        return cols if cols and cols > 0 else 80
+
+    def _disp_w(self, s):
+        """终端显示宽度（CJK/全角按 2 列，其余 1 列）。"""
+        return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
+
+    def _fit(self, s, maxw):
+        """返回 s 中显示宽度 ≤ maxw 的最长前缀字符数（按字符原子切，不拆多字节）。"""
+        w = 0
+        for i, ch in enumerate(s):
+            cw = 2 if ord(ch) > 0x2E7F else 1
+            if w + cw > maxw:
+                return i
+            w += cw
+        return len(s)
+
+    def _clamp(self, text, cols):
+        """超宽截断为 head…tail，保证单行不折行。
+
+        折行会让 \r 只能回到折行段首而非整行首，后续原地刷新向后堆叠
+        （长句实测刷成 "AI: X AI: X AI: X"）——截断到列宽内，\r 刷新才可靠。
+        """
+        if self._disp_w(text) <= cols:
+            return text
+        ell = "…"                                  # 占 1 列
+        head_max = max(4, (cols - 1) * 3 // 5)     # 头部留多些（含 AI: 前缀/心态标记）
+        tail_max = max(4, (cols - 1) - head_max)   # 尾部=最新增量，流式最关心
+        nh = self._fit(text, head_max)
+        nt = self._fit("".join(reversed(text)), tail_max)
+        return text[:nh] + ell + text[len(text) - nt:]
+
     def _write_line(self, text):
-        """原地刷新当前行；新文本短于旧文本 → 补空格盖掉残留，再回卷列 0。"""
+        """原地刷新当前行；新文本短于旧文本 → 补空格盖掉残留，再回卷列 0。
+
+        _last_len 按【显示列宽】记（CJK 2 列）：残留清除若按字符数，CJK 密集行
+        的列宽差是字符差的 ~2 倍，补的空格不够 → 旧行尾部漏出来（实测
+        "AI: …星期六。　　　　　　　休息放松一下。"——"休息放松一下"是上
+        一版长预览的残留）。
+        """
+        # 行内 \r/\n 会撕破单行显示：agent 流式常带换行，多行文本反复重写=刷屏
+        text = text.replace("\r", " ").replace("\n", " ")
+        # 超宽截断：单行永不折行（折行 → \r 回不到整行首 → 堆叠刷屏）
+        text = self._clamp(text, self._term_cols())
+        w = self._disp_w(text)
         prev = self._last_len
         sys.stdout.write("\r" + text)
-        if prev > len(text):
-            sys.stdout.write(" " * (prev - len(text)))
+        if prev > w:
+            sys.stdout.write(" " * (prev - w))
             sys.stdout.write("\r")
         sys.stdout.flush()
-        self._last_len = len(text)
+        self._last_len = w
 
     def update(self, kind, text):
         with self._lock:
@@ -449,7 +497,9 @@ def main():
         con.update("ai", "AI: " + full)             # AI 流式：原地刷新（含【心态：xxx】标记）
 
     def on_ai_sentence(_s):
-        con.newline()                               # 这句已送 TTS（开播）→ 换行定稿
+        # 这句已送 TTS（开播）→ 用完整句子定稿一行（agent 模式整段回复切多句时，
+        # 每句独立成行显示，而不是只留最后那次截断预览）
+        con.finalize("ai", "AI: " + _s)
 
     def on_llm_start():
         # 定稿句 → LLM 请求已发出（等待首 token）；首 delta 到来时被 "AI: " 原地覆盖
