@@ -156,7 +156,7 @@ if "%BRAIN%"=="agent" (
     )
 )
 
-set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %EXTRA%"
+set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda --tts-backend vits --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %EXTRA%"
 echo [run] %CMD%
 %CMD%
 

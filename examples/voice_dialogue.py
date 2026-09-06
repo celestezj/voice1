@@ -239,6 +239,21 @@ class _Console:
             self._last_len = 0
 
 
+def _list_vits_voices():
+    """--tts-list-voices：打印 voice0 vits 音色清单（id: 名字）后由调用方退出。"""
+    spk = os.path.join(_VOICE0, ".cache", "vits", "VITS", "speakers_list.txt")
+    if not os.path.isfile(spk):
+        print("错误：找不到音色表 %s" % spk, flush=True)
+        print("vits 模型未下载，先跑 voice0 的 `python preload_vits.py` 一次（权重在 "
+              "voice0/.cache/vits/，不占 voice1 空间）。", flush=True)
+        sys.exit(1)
+    with open(spk, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                print(line, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asr-device", default="cuda", help="auto|cpu|cuda（ASR）")
@@ -247,6 +262,15 @@ def main():
                     help="TTS 响度归一化（默认 None=原样播放）：rms=逐句静态 RMS 对齐 "
                          "-24dBFS（句间音量更一致）；agc=静态对齐+句内动态压缩+短停压缩"
                          "（治句首轻/句尾轻/中间响，推荐）")
+    ap.add_argument("--tts-backend", choices=["melo", "vits"], default="vits",
+                    help="TTS 后端（默认 vits 多音色）：melo=原单音色（切换测试用 "
+                         "--tts-backend melo）")
+    ap.add_argument("--tts-voice-id", default=None,
+                    help="vits 音色（默认 551 派蒙）：数字=speaker id（0~803）或名字"
+                         "（如 可莉）；melo 忽略")
+    ap.add_argument("--tts-list-voices", action="store_true",
+                    help="列出 vits 音色清单（读 voice0/.cache/vits/VITS/speakers_list.txt）"
+                         "并退出")
     ap.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True,
                     help="ASR 流式（默认开；--no-streaming 退化为整句）")
     ap.add_argument("--input-device", default=None, help="麦克风设备：序号或名称子串")
@@ -353,6 +377,11 @@ def main():
                          "关闭后气泡/表情保持到下一轮或拜拜/超时/停下才清")
     args = ap.parse_args()
 
+    # ---- vits 音色清单（--tts-list-voices）：打印后退出，不初始化引擎 ----
+    if args.tts_list_voices:
+        _list_vits_voices()
+        sys.exit(0)
+
     # ---- 麦克风 ----
     input_idx, dev_sr = pick_input_device(args.input_device)
     dev = sd.query_devices(input_idx)
@@ -422,8 +451,9 @@ def main():
                 print("[live2d] 联动就绪 → 127.0.0.1:%d（已复位初始状态）"
                       % args.live2d_port, flush=True)
 
-    tts = RealtimeTTS(device=args.tts_device, backend="melo", mode="queue",
+    tts = RealtimeTTS(device=args.tts_device, backend=args.tts_backend, mode="queue",
                       normalize=args.tts_normalize,   # None=原样；rms/agc=响度归一化（voice0）
+                      voice=args.tts_voice_id,        # vits 音色（id 或名字字符串，voice0 自行解析；melo 忽略）
                       profile=True, debug=args.debug)
     idle_tts = None                        # 包一层：对话句/就绪语/告别语/启动问候都送说话框
     if live2d is not None and live2d.enabled:

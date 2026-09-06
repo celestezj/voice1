@@ -87,6 +87,10 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --system-prompt dialogue/user_prompt.txt`
   （`--vad-tail 300` 比默认 600 每轮首包快 300ms；残句由 post-commit barge 兜底，停顿多
   就调回 600）
+- **TTS 后端/音色**：默认 **vits** 多音色（`--tts-backend vits`，一键启动已带）；
+  音色用 `--tts-voice-id <id或名字>`（默认 551 派蒙；`--tts-list-voices` 打印 804 个音色）。
+  切回 melo 测试：`--tts-backend melo`（`start_dialogue.bat llm --tts-backend melo`）。
+  vits 权重在 voice0/.cache/vits/（voice0 `preload_vits.py` 一次性下载，voice0 只读不代管）。
 - **一键启动脚本** `start_dialogue.bat [llm|agent] [额外参数...]`：默认不传 = **llm** 接入；
   `start_dialogue.bat agent` = **agent** 接入（本地 claude 常驻会话，`--brain agent`），
   **若 `sessions/agent_session_id.txt` 已有历史则自动加 `--agent-resume` 续上次会话**，

@@ -35,7 +35,8 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 ```
 
 - `--asr-device cuda`：ASR（paraformer）跑 GPU；无 GPU 换 `cpu`（实时性差些）。
-- `--tts-device cuda`：TTS（melo）跑 GPU。
+- `--tts-device cuda`：TTS 跑 GPU（默认 **vits** 多音色后端；要回 melo 单音色加
+  `--tts-backend melo`）。
 - `--vad-tail 300`：把静音判定从默认 600ms 降到 300ms，**每轮首包音频快 300ms**。
   代价是组织语言停顿 >300ms 时句子会被提前判定"说完"（残句）——残句由 post-commit
   barge 零延迟兜底：续句定稿在窗口内 → 撤答复合并重答；窗口外 → 变独立一轮（尾巴不丢）。
@@ -46,6 +47,13 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - `--tts-normalize`：TTS 响度归一化（默认 None=原样播放）。`rms`=逐句静态 RMS 对齐
   -24dBFS（句间音量更一致）；`agc`=静态对齐+句内动态压缩+短停压缩（句首轻/句尾轻/
   中间响，推荐）。透传 voice0 `RealtimeTTS(normalize=…)`（voice0 只读，不改它）。
+- `--tts-backend`：TTS 后端，默认 `vits`（多音色，804 种）；`melo`=原单音色（随时切回
+  测试用 `--tts-backend melo`）。vits 权重在 `voice0/.cache/vits/`（属 voice0 项目，
+  用 voice0 的 `preload_vits.py` 一次性下载；缺权重时 voice0 会报错并提示）。
+- `--tts-voice-id`：vits 音色，默认 551 派蒙。数字=speaker id（0~803，如 `103`=可莉）
+  或名字（如 `可莉`）；`melo` 后端下忽略。
+- `--tts-list-voices`：打印全部 804 个 vits 音色（`id: 名字`）后退出（不启动对话），
+  方便挑音色。
 - 打断词默认「停下」，回声门控默认开（半双工）。
 - 唤醒默认开（`--wake-word` 默认"小爱小爱"）：启动即休眠，说唤醒词才进对话，详见
   「休眠 / 唤醒 / 退出」。要恢复"启动即对话"旧行为：`--wake-word ""`。
@@ -137,7 +145,7 @@ sequenceDiagram
         LLM-->>CTL: on_ai_delta → 控制台"AI: …"流式原地刷新
         CTL->>CTL: _emit_sentences()：按 。！？ 切句<br/>（逗号不切；40字硬切兜底）
         CTL->>TTS: tts.submit(句)（非阻塞入队）
-        TTS->>TTS: melo合成(~0.4s) + 播放（queue串行）
+        TTS->>TTS: TTS合成(~0.4s) + 播放（queue串行）
     end
     LLM->>CTL: 流结束：flush残句 + 记录usage<br/>commit(user→assistant)进历史
     end
@@ -370,7 +378,8 @@ t+4300+    只听"停下"（回声到了，防止 AI 回答自己的回声）
 只有 `done`（整个任务**播完**或被打断才置位）、`wait()`、`canceled`、`timing`（仅 profile
 开时才有、是内部基准结构而非 API 契约），**没有"已开始播放"的事件信号**。所以"音频从喇叭
 里出来"这个瞬间在现有接口下观测不到，只能拿"合成需要多久"（唯一可预测的量）去估算——
-窗口设成 1.5s ≈ melo 首句合成延迟的上限。
+窗口设成 1.5s ≈ melo 首句合成延迟的上限。（换 **vits** 后端后首句合成延迟不同——
+  若补句总被吞/总重答，按实测微调 `--post-commit-window`。）
 
 **controller 怎么检测 done（不轮询）**：`_tts_watch` 守护线程**阻塞在 `job.wait()`** 上
 （`threading.Event`，voice0 播完/被打断时调 `mark_done()` 置位才唤醒，永不悬挂），队列排空

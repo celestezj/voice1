@@ -46,13 +46,17 @@ from tts import RealtimeTTS                # noqa: E402  voice0
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cpu", help="cpu|cuda（两引擎共用）")
+    ap.add_argument("--backend", choices=["melo", "vits"], default="melo",
+                    help="voice0 TTS 后端（默认 melo；vits=多音色，--voice 选音色）")
+    ap.add_argument("--voice", default=None,
+                    help="vits 音色（默认 551 派蒙）：数字=speaker id（0~803）或名字（如 可莉）")
     args = ap.parse_args()
 
     tmp = os.path.join(_PROJ1, "tmp")
     os.makedirs(tmp, exist_ok=True)
 
     # 1) voice0 TTS：合成一句开场白 → 落盘 wav（同时经声卡播放）
-    tts = RealtimeTTS(device=args.device, backend="melo", profile=True)
+    tts = RealtimeTTS(device=args.device, backend=args.backend, voice=args.voice, profile=True)
     greet = "你好，我是语音助手。语音识别引擎已就绪。"
     greet_wav = os.path.join(tmp, "both_greet.wav")
     tts.speak(greet, save_wav=greet_wav)          # 同步：合成完返回

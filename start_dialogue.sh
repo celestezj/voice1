@@ -29,6 +29,6 @@ fi
 
 echo "[启动] voice-asr 环境 OK，开始语音对话（Ctrl+C 退出）..."
 exec python examples/voice_dialogue.py \
-    --asr-device cuda --tts-device cuda --vad-tail 300 --vad-threshold-db -42 \
+    --asr-device cuda --tts-device cuda --tts-backend vits --vad-tail 300 --vad-threshold-db -42 \
     --system-prompt dialogue/user_prompt.txt --llm-config dialogue/config.local.json \
     --tts-normalize rms --live2d-port 5000 "$@"
