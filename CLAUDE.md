@@ -87,15 +87,18 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300 --system-prompt dialogue/user_prompt.txt`
   （`--vad-tail 300` 比默认 600 每轮首包快 300ms；残句由 post-commit barge 兜底，停顿多
   就调回 600）
-- **TTS 后端/音色**：默认 **vits** 多音色（`--tts-backend vits`，一键启动已带）；
-  音色用 `--tts-voice-id <id或名字>`（默认 551 派蒙；`--tts-list-voices` 打印 804 个音色）。
-  切回 melo 测试：`--tts-backend melo`（`start_dialogue.bat llm --tts-backend melo`）。
-  vits 权重在 voice0/.cache/vits/（voice0 `preload_vits.py` 一次性下载，voice0 只读不代管）。
-- **一键启动脚本** `start_dialogue.bat [llm|agent] [额外参数...]`：默认不传 = **llm** 接入；
+- **TTS 后端/音色**：默认 **melo**（一键启动即 melo）。换 vits 多音色：`start_dialogue.bat vits`
+  快捷词（或 `--tts-backend vits`）；音色用 `--tts-voice-id <id或名字>`（默认 551 派蒙；
+  `--tts-list-voices` 打印 804 个音色）。vits 权重在 voice0/.cache/vits/（voice0
+  `preload_vits.py` 一次性下载，voice0 只读不代管）。
+- **一键启动脚本** `start_dialogue.bat [llm|agent] [vits|melo] [额外参数...]`（sh 同理），
+  四个快捷词**任意顺序**，其余参数原样透传（放在最后）。完整签名与组合见
+  `docs/voice-dialogue.md`「一键启动脚本」；默认不传 = **llm + melo**；
   `start_dialogue.bat agent` = **agent** 接入（本地 claude 常驻会话，`--brain agent`），
   **若 `sessions/agent_session_id.txt` 已有历史则自动加 `--agent-resume` 续上次会话**，
-  无则新建；llm 模式自动带 `--llm-config dialogue\config.local.json`（agent 模式不带），
-  其余参数原样透传（如 `start_dialogue.bat agent --vad-tail 600`）。
+  无则新建；llm 模式自动带 `--llm-config dialogue\config.local.json`（agent 模式不带）；
+  `vits` = 换 vits 多音色、`melo` = 显式 melo。透传例：
+  `start_dialogue.bat agent vits --vad-tail 600 --tts-voice-id 可莉`。
 - **参数含义白话版 + 快速开始 + 架构时序图**（vad-tail / post-commit-window / echo-guard /
   merge-window 的直觉 + 时间线 + 校准 + mermaid 线程时序）：见
   [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些参数很难懂，解释时先讲

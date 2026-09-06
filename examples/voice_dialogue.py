@@ -262,9 +262,9 @@ def main():
                     help="TTS 响度归一化（默认 None=原样播放）：rms=逐句静态 RMS 对齐 "
                          "-24dBFS（句间音量更一致）；agc=静态对齐+句内动态压缩+短停压缩"
                          "（治句首轻/句尾轻/中间响，推荐）")
-    ap.add_argument("--tts-backend", choices=["melo", "vits"], default="vits",
-                    help="TTS 后端（默认 vits 多音色）：melo=原单音色（切换测试用 "
-                         "--tts-backend melo）")
+    ap.add_argument("--tts-backend", choices=["melo", "vits"], default="melo",
+                    help="TTS 后端（默认 melo）：vits=多音色（--tts-list-voices 看清单，"
+                         "--tts-voice-id 选音色）")
     ap.add_argument("--tts-voice-id", default=None,
                     help="vits 音色（默认 551 派蒙）：数字=speaker id（0~803）或名字"
                          "（如 可莉）；melo 忽略")

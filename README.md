@@ -32,6 +32,9 @@ python bench/bench_asr.py --backend paraformer --device cuda --tag my     # 验�
 - 全部设计决策与坑：见 [`docs/asr-architecture-decision.md`](docs/asr-architecture-decision.md)。
 - **语音对话快速开始**（ASR + DeepSeek LLM + voice0 TTS 全链路，GPU）：
   `PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300`
+- **一键启动脚本**：Windows `start_dialogue.bat [llm|agent] [vits|melo]`，或 `bash start_dialogue.sh`；
+  默认 llm+melo，`vits`=换多音色，`agent`=本地 claude 大脑，任意组合+透传见
+  [`docs/voice-dialogue.md`](docs/voice-dialogue.md)「一键启动脚本」。
 - 语音对话：快速开始 + 参数白话解释 + 架构时序图：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。
 - LLM 引擎扩展（DeepSeek/llmx 之外换引擎怎么做）：见 [`docs/EXTENDING-BACKENDS.md`](docs/EXTENDING-BACKENDS.md)。
 

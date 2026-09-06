@@ -8,17 +8,33 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 echo [info] work dir: %SCRIPT_DIR%
 
-rem 1b. brain mode: start_dialogue.bat [llm|agent] [voice_dialogue extra args...]
-rem     no arg = llm (default, unchanged); agent = local claude persistent session
+rem 1b. mode args: start_dialogue.bat [llm|agent] [vits|melo] [voice_dialogue extra args...]
+rem     no arg = llm (default); agent = local claude persistent session;
+rem     vits|melo = TTS backend override (default melo)
 set "BRAIN=llm"
+set "TTSBACKEND="
+:mode_loop
 if /i "%1"=="agent" (
     set "BRAIN=agent"
     shift
-) else if /i "%1"=="llm" (
+    goto mode_loop
+)
+if /i "%1"=="llm" (
     set "BRAIN=llm"
     shift
+    goto mode_loop
 )
-echo [info] brain: %BRAIN%
+if /i "%1"=="vits" (
+    set "TTSBACKEND=--tts-backend vits"
+    shift
+    goto mode_loop
+)
+if /i "%1"=="melo" (
+    set "TTSBACKEND=--tts-backend melo"
+    shift
+    goto mode_loop
+)
+echo [info] brain: %BRAIN%  tts-backend: %TTSBACKEND%
 
 rem collect remaining args, pass through verbatim to voice_dialogue.py
 set "EXTRA="
@@ -156,7 +172,7 @@ if "%BRAIN%"=="agent" (
     )
 )
 
-set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda --tts-backend vits --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %EXTRA%"
+set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda %TTSBACKEND% --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %EXTRA%"
 echo [run] %CMD%
 %CMD%
 

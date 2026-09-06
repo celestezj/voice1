@@ -28,7 +28,13 @@ if ! python -c "import sys; sys.exit(0 if 'voice-asr' in sys.executable else 1)"
 fi
 
 echo "[启动] voice-asr 环境 OK，开始语音对话（Ctrl+C 退出）..."
+# TTS 后端快捷词：start_dialogue.sh vits|melo（默认 melo；vits=多音色）
+TTS_BACKEND=""
+case "${1:-}" in
+    vits) TTS_BACKEND="--tts-backend vits"; shift ;;
+    melo) TTS_BACKEND="--tts-backend melo"; shift ;;
+esac
 exec python examples/voice_dialogue.py \
-    --asr-device cuda --tts-device cuda --tts-backend vits --vad-tail 300 --vad-threshold-db -42 \
+    --asr-device cuda --tts-device cuda $TTS_BACKEND --vad-tail 300 --vad-threshold-db -42 \
     --system-prompt dialogue/user_prompt.txt --llm-config dialogue/config.local.json \
     --tts-normalize rms --live2d-port 5000 "$@"

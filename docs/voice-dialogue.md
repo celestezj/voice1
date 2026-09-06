@@ -27,6 +27,24 @@
     （默认 `dialogue/config.local.json`；`--llm-model/--base-url/--api-key` 仍可单独覆盖）。
 - 中文输出必须加 `PYTHONIOENCODING=utf-8`（Windows GBK 终端会乱码/报错）。
 
+## 一键启动脚本（start_dialogue.bat / start_dialogue.sh）
+
+签名：`start_dialogue.bat [llm|agent] [vits|melo] [额外参数...]`（sh 同理，`bash start_dialogue.sh [llm|agent] [vits|melo] [额外参数...]`）。
+`llm / agent / vits / melo` 四个**快捷词任意顺序**，脚本逐个消费，遇到非快捷词即停止、其余原样透传；只传一个快捷词时其余用默认。
+
+| 启动命令 | 效果 |
+|---|---|
+| `start_dialogue.bat` | **llm 大脑 + melo TTS**（默认，等同旧行为） |
+| `start_dialogue.bat llm` | 显式 llm + melo |
+| `start_dialogue.bat agent` | **agent 大脑**（本地 claude 常驻，`--brain agent`；`sessions/agent_session_id.txt` 有历史自动 `--agent-resume` 续会话，无则新建；不带 `--llm-config`） |
+| `start_dialogue.bat vits` | llm + **vits 多音色**（默认音色 551 派蒙） |
+| `start_dialogue.bat melo` | 显式 melo（与默认相同，用于覆盖前面的 vits） |
+| `start_dialogue.bat agent vits` | agent + vits（`vits agent` 顺序任意等价） |
+| `start_dialogue.bat vits --tts-voice-id 可莉` | vits + 指定音色（id 或名字；melo 下忽略） |
+| `start_dialogue.bat agent vits --vad-tail 600` | agent + vits + 透传任意 voice_dialogue 参数 |
+
+> 透传参数走 argparse「后者覆盖」：`--tts-backend melo` 直接透传也能在最后覆盖前面的 vits 快捷词（同理 `--tts-voice-id`/`--vad-tail` 等）。
+
 **推荐启动**（GPU 机器）：
 
 ```bash
@@ -35,8 +53,7 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 ```
 
 - `--asr-device cuda`：ASR（paraformer）跑 GPU；无 GPU 换 `cpu`（实时性差些）。
-- `--tts-device cuda`：TTS 跑 GPU（默认 **vits** 多音色后端；要回 melo 单音色加
-  `--tts-backend melo`）。
+- `--tts-device cuda`：TTS 跑 GPU（默认 **melo**；换 vits 多音色加 `--tts-backend vits`）。
 - `--vad-tail 300`：把静音判定从默认 600ms 降到 300ms，**每轮首包音频快 300ms**。
   代价是组织语言停顿 >300ms 时句子会被提前判定"说完"（残句）——残句由 post-commit
   barge 零延迟兜底：续句定稿在窗口内 → 撤答复合并重答；窗口外 → 变独立一轮（尾巴不丢）。
@@ -47,9 +64,10 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - `--tts-normalize`：TTS 响度归一化（默认 None=原样播放）。`rms`=逐句静态 RMS 对齐
   -24dBFS（句间音量更一致）；`agc`=静态对齐+句内动态压缩+短停压缩（句首轻/句尾轻/
   中间响，推荐）。透传 voice0 `RealtimeTTS(normalize=…)`（voice0 只读，不改它）。
-- `--tts-backend`：TTS 后端，默认 `vits`（多音色，804 种）；`melo`=原单音色（随时切回
-  测试用 `--tts-backend melo`）。vits 权重在 `voice0/.cache/vits/`（属 voice0 项目，
-  用 voice0 的 `preload_vits.py` 一次性下载；缺权重时 voice0 会报错并提示）。
+- `--tts-backend`：TTS 后端，默认 `melo`；`vits`=多音色（804 种），一键切用
+  `start_dialogue.bat vits`（sh 同理），或直接 `--tts-backend vits`。vits 权重在
+  `voice0/.cache/vits/`（属 voice0 项目，用 voice0 的 `preload_vits.py` 一次性下载；
+  缺权重时 voice0 会报错并提示）。
 - `--tts-voice-id`：vits 音色，默认 551 派蒙。数字=speaker id（0~803，如 `103`=可莉）
   或名字（如 `可莉`）；`melo` 后端下忽略。
 - `--tts-list-voices`：打印全部 804 个 vits 音色（`id: 名字`）后退出（不启动对话），
