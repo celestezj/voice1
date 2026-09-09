@@ -112,7 +112,12 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   （`dialogue/agent.py` `ClaudeAgentClient`，claude-agent-sdk）——旁路自实现历史/压缩/
   系统提示词（上下文在 claude 会话，人格=`assistant/CLAUDE.md` 显式传 system_prompt，
   SDK 实测不自动加载 cwd 的 CLAUDE.md）；「停下」=ESC（abort 不 kill 进程，不进上下文）；
-  敏感操作走 `【询问】` 语音确认（`_ASK_RE` 送 TTS 剥掉不念）；`--agent-resume` 续上次会话
+  敏感操作走 `【询问】` 语音确认（`_ASK_RE` 送 TTS 剥掉不念）；工具权限默认放行
+  `PowerShell/Bash/Read/Write/Edit/Glob/Grep/WebFetch/WebSearch/Skill`（`agent.py`
+  `_DEFAULT_ALLOWED_TOOLS`，SDK 无终端须预放行技能才能跑；**Windows 两个 shell 都能跑**——
+  模型可能走 Bash（读了 SKILL.md 的 `bash fetch.sh`）也可能走 PowerShell，**当初只放行
+  PowerShell 导致走 Bash 的会话报"脚本被拦住了"（天气查不到根因）**，故双 shell 都放行）；
+  `--agent-resume` 续上次会话
   （session_id 落盘 `sessions/agent_session_id.txt`）。默认 `--brain llm` 时现有 LLM 集成
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自
   SDK `StreamEvent.content_block_delta.text_delta`（不是 AssistantMessage）；多轮 query 间

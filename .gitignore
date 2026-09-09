@@ -30,3 +30,10 @@ __pycache__/
 dialogue/config.local.json
 dialogue/llm.config.local.json
 dialogue/user_prompt.txt
+
+# agent 技能凭据/产物防御性排除：真实凭据与数据只放 assistant/.claude/skills/qweather/
+# （.claude/ 已被上面整体排除，天然不入库）；此处兜底拦住万一被误放到 assistant/ 根的情况
+assistant/config.json
+assistant/ed25519-private.pem
+assistant/weather_data.json
+assistant/weather_summary.md

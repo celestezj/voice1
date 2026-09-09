@@ -61,7 +61,7 @@
                                           │
                           assistant/（独立目录，agent 的 cwd）
                             CLAUDE.md = 人格 + 【询问】规则
-                            .mcp.json / skills/ = 开灯、天气等能力
+                            .mcp.json / .claude/skills/ = 开灯、天气等能力
 ```
 
 - **agent 模式不读 voice1 工程 CLAUDE.md**：claude 只加载它自己工作目录
@@ -128,7 +128,7 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
 |---|---|---|---|
 | 新增 | `dialogue/agent.py` | `ClaudeAgentClient`：起/resume 常驻会话、`query()` 只取最终结论、`abort()`（不 kill）、`close()`、session_id 落盘 | ✅ |
 | 新增 | `assistant/CLAUDE.md` | 人格（口语化、【心态】标记、【询问】权限规则、技能指引）——独立目录，不进 voice1 工程 CLAUDE.md | ✅ |
-| 新增 | `assistant/.mcp.json`、`assistant/skills/` | 开灯/天气等能力（按需） | ✅ 骨架 |
+| 新增 | `assistant/.mcp.json`、`assistant/.claude/skills/` | 开灯/天气等能力（按需） | ✅ 骨架 |
 | 修改 | `dialogue/controller.py` | `agent` 构造参数；agent 模式旁路 `_build_messages`/压缩/系统提示；`【询问】`送 TTS 剥掉不念（`_ASK_RE`）；`abort()` 钩子（hard_stop / barge） | ✅ |
 | 修改 | `examples/voice_dialogue.py` | `--brain` / `--agent-resume` / `--agent-dir` / `--agent-model` / `--agent-permission-mode` 参数 + 接线 | ✅ |
 | 修改 | `docs/voice-dialogue.md` + 根 `CLAUDE.md` | 文档 | ✅ |
@@ -159,6 +159,18 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
     `acceptEdits`（仅自动接受文件编辑）/ `bypassPermissions`（全放行，危险）。
     v1 推荐姿势：把想真正放行的**具体工具**列进 `allowed_tools`（如开灯的 MCP 工具），
     其余保持 default 自动拒绝兜底；【询问】变成"用预允许工具前的社交许可层"。
+- **默认白名单（2026-09-09 落地，09-09 天气被拦后扩充）**：`agent.py` 的 `_DEFAULT_ALLOWED_TOOLS`
+  预放行 `PowerShell / Bash / Read / Write / Edit / Glob / Grep / WebFetch / WebSearch / Skill`
+  （未显式传 allowed_tools 时生效）——技能（如天气）要跑脚本/读配置/写结果，须这些底层工具
+  放行，否则 SDK 无终端可"点允许"，agent 只能让你去命令行手动批准。
+  **实测 Windows 两个 shell 都能跑**：PowerShell 与 Bash（Git Bash）。模型可能任选其一——
+  读了 SKILL.md（写 `bash fetch.sh`）的会走 Bash，没细读的直接 PowerShell 跑 python。
+  **天气"脚本被拦"根因**：白名单最初只有 PowerShell，走 Bash 的会话被自动拒绝，模型报
+  "运行脚本被拦住了…你去终端放行"（措辞与强制禁 shell 的探针一字不差）。故两个 shell 都放行。
+  `Skill` 实测即使不在白名单也不会被拒（技能发现即放行），显式列出更稳；`WebFetch/WebSearch`
+  是模型在脚本被拒/失败时退到"用网页查"的兜底，放行避免二次拒绝。
+  安全性：放行 PowerShell/Bash = agent 可在本机执行任意命令，系统硬门消失，只剩人格【询问】
+  这层社交许可；更严的语音级工具授权（`can_use_tool` 钩子 + 语音确认）留作后续。
 
 ## 技术风险 / 待验证点
 

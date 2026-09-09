@@ -32,6 +32,23 @@ from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions,
 # 默认 agent 工作目录（assistant 人格目录，repo 根的 assistant/）——主程序可 --agent-dir 覆盖
 _DEFAULT_AGENT_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assistant")
+# 默认放行工具白名单：SDK 会话无交互终端，permission_mode=default 下未放行的工具调用
+# 会被系统自动拒绝（agent 只能让用户"去终端点允许"，但无终端可点）。技能要真跑起来须在此
+# 放行底层工具。传显式 allowed_tools 时覆盖。
+#
+# 实测（claude 2.1.266 Windows）：
+# - shell 有两个都可用——**PowerShell** 与 **Bash**（Git Bash）。模型可能任选其一：
+#   读了 SKILL.md（写 `bash fetch.sh`）的模型会走 Bash；没细读的会直接 PowerShell 跑 python。
+#   当初白名单只有 PowerShell，走 Bash 的会话被自动拒绝 → 模型报"运行脚本被拦住了"
+#   （措辞与强制禁 shell 探针一字不差）。故两个 shell 都放行。
+# - **Skill** 工具实测即使不在白名单也不会被拒（技能发现即放行），显式列出更稳。
+# - **WebFetch/WebSearch** 兜底：模型在脚本被拒/失败时会退到"用网页查"；放行避免二次拒绝。
+_DEFAULT_ALLOWED_TOOLS = [
+    "PowerShell", "Bash",          # 双 shell：模型可能任选其一（Bash 实测 Windows 也能跑）
+    "Read", "Write", "Edit", "Glob", "Grep",
+    "WebFetch", "WebSearch",       # 网页兜底（脚本被禁时模型会退到网页查）
+    "Skill",                       # 技能加载（默认发现；显式列出防误拒）
+]
 _DEFAULT_PERSONA_FILE = "CLAUDE.md"        # 人格文件（人格唯一事实源，显式传 system_prompt）
 _DEFAULT_SESSION_FILE = os.path.join(      # session_id 落盘（--agent-resume 续会话用）
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -51,7 +68,8 @@ class ClaudeAgentClient:
         self._session_id_file = session_id_file or _DEFAULT_SESSION_FILE
         self._resume = bool(resume)
         self._permission_mode = permission_mode
-        self._allowed_tools = list(allowed_tools or [])
+        self._allowed_tools = (list(allowed_tools) if allowed_tools is not None
+                               else list(_DEFAULT_ALLOWED_TOOLS))
         self._disallowed_tools = list(disallowed_tools or [])
         self._model = model
         self._connect_timeout = connect_timeout

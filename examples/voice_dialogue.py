@@ -362,9 +362,12 @@ def main():
                     choices=["default", "acceptEdits", "plan", "bypassPermissions",
                              "dontAsk", "auto"], default="default",
                     help="agent 权限模式（默认 default）：SDK 流式下 claude 无终端，未预允许的"
-                         "工具直接自动拒绝（实测写文件被拒、agent 正常汇报，安全兜底）——要真正"
-                         "放行具体工具请在 agent.py 的 allowed_tools 白名单列它（不触发硬门），"
-                         "或 acceptEdits（仅自动接受文件编辑）/ bypassPermissions（全放行，危险）。"
+                         "工具直接自动拒绝（实测写文件被拒、agent 正常汇报，安全兜底）——agent.py "
+                         "已默认放行 PowerShell/Bash/Read/Write/Edit/Glob/Grep/WebFetch/WebSearch/"
+                         "Skill 供技能使用（Windows 双 shell 都能跑，模型可能走 Bash 或 PowerShell），"
+                         "要放行其他具体工具在 agent.py 的 allowed_tools "
+                         "白名单列它（不触发硬门），或 acceptEdits（仅自动接受文件编辑）/ "
+                         "bypassPermissions（全放行，危险）。"
                          "敏感操作配合人格【询问】语音确认")
     ap.add_argument("--live2d-port", type=int, default=None,
                     help="live2d 桌宠联动端口（如 5000，desktop_pet.py --control-port）：LLM "
