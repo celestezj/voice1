@@ -111,6 +111,51 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - 控制台同样有流式出字（agent 模式从 partial 增量走，TTS 仍只取最终结论）与
   `→ LLM 请求中…` / `× LLM 出错` 状态行。
 
+## assistant/ 目录（agent 大脑工作区，独立 git 子模块）
+
+`--brain agent` 时 claude 会话的工作目录默认是 `repo 根/assistant/`（`--agent-dir` 可换），
+对话人格与 agent 能力都装在这里。**它被管理为独立的 git 子模块**（GitHub 私有仓库），与
+voice1 主仓库解耦：改人格 / 加技能只动子模块，不污染主仓库历史；子模块可单独 clone、
+单独版本化。
+
+**设计目标**
+
+- **人格与工程规范分离**：`assistant/CLAUDE.md` = 对话人格（连接时显式读作 `system_prompt`，
+  SDK 不会自动加载 cwd 的 CLAUDE.md），与根 `CLAUDE.md`（工程规范）互不干扰。改人格只改
+  子模块里这一个文件。
+- **能力自包含、随目录走**：`assistant/.claude/skills/`（claude 标准技能发现位置）+
+  `assistant/.mcp.json`（MCP 服务）定义 agent 的全部工具能力，不依赖主仓库任何东西。
+- **权限边界统一**：人格规则（【询问】先征求同意）+ 权限模式 / 工具白名单
+  （`dialogue/agent.py` 的 `_DEFAULT_ALLOWED_TOOLS`）共同决定 agent 可直接做什么、要问什么。
+- **可移植、凭据不落地远端**：入库的是模板 + 脚本 + 文档，新机器 clone 后
+  `git submodule update --init` 拉子模块、补一份本地凭据即可用；真实凭据（和风 API Key /
+  JWT 私钥）由子模块自身 `.gitignore` 排除，**绝不进仓库**（见下）。
+
+**基本目录结构**
+
+```
+assistant/                     # agent 工作目录 = 独立 git 子模块（GitHub 私有仓库）
+├── CLAUDE.md                  对话人格（连接时显式读作 system_prompt）
+├── .mcp.json                  MCP 服务配置（外部工具，空骨架）
+├── .gitignore                 子模块忽略规则（凭据 / 缓存不入库）
+├── .claude/
+│   ├── settings.local.json    Claude Code 本地配置（机器相关）
+│   └── skills/
+│       └── qweather/          和风天气技能（脚本 + 模板 + 本地数据）
+│           ├── SKILL.md       技能说明（含数据新鲜度硬规则）
+│           ├── fetch.sh / fetch.bat   一键拉取 + AI 摘要（force / 30 分钟新鲜度自判）
+│           ├── scripts/       weather.py / weather_to_ai_summary.py / check_fresh.py / get_location.py
+│           ├── config.json.template / ed25519-*.template   空模板（可入库、可分享）
+│           ├── config.json / ed25519-private.pem   和风凭据（**不入库**）
+│           └── weather_data.json / weather_summary.md   数据产物（可再生）
+└── skills/
+    └── README.md              技能总览：发现位置 / 白名单 / 根因（说明文档，技能实体在 .claude/）
+```
+
+> **子模块凭据规则**：`config.json`（和风 API Key / JWT）与 `ed25519-private.pem`（私钥）是
+> 真实凭据，**绝不提交、绝不外传**——哪怕私有仓库也不入库（历史删不掉、误改公开即一键泄露）。
+> 可入库/可分享的只有 `*.template` 空模板与 `ed25519-public.pem`（公钥本就公开）。
+
 ## 架构：线程模型与时序
 
 单进程、**全链路非阻塞**：主线程只负责采麦克风，识别 / LLM / TTS 各在独立线程干活。

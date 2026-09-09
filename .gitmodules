@@ -1,0 +1,3 @@
+[submodule "assistant"]
+	path = assistant
+	url = git@celestezj:celestezj/assistant.git
