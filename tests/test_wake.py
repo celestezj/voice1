@@ -8,7 +8,7 @@
   3   go_sleep：bye/timeout 返回各自告别语；已休眠幂等
   4   feed_decision 自播门控：就绪语/告别语播放期 → "kws_only"；播完清理
   5   feed_decision 静默超时：非播放期 + 超时 → 回休眠 "none"；语音能量刷新计时
-  6   busy（AI 播放）期不判超时；inactive_timeout=0 永不超时
+  6   engaged（应答期=LLM思考/TTS播放）不判超时且刷新计时（慢查询后不立刻退下）；inactive_timeout=0 永不超时
   7   note_partial：对话期刷新计时；休眠期忽略
   8   sherpa 关键词文件按词集哈希唯一（打断词/唤醒词共存不互覆）
   9   静默超时告别语：feed_decision 超时回休眠后 consume_farewell 可取走播放（幂等）
@@ -91,16 +91,33 @@ assert w.state == SLEEP, "超时应回休眠"
 assert w.feed_decision(now + 162.0, QUIET, POW, False) == "none", "休眠期防御"
 print("测试5 静默超时 OK: 说话刷新→不超时, 静默60s→回休眠")
 
-# ---- 6. busy 期不判超时 / inactive_timeout=0 ----
+# ---- 6. engaged 应答期不判超时 / inactive_timeout=0 ----
 w = WakeSession(wake_enabled=False, inactive_timeout=60)
 now = 2000.0
 w.last_activity = now - 1000.0                          # 早已"超时"
-assert w.feed_decision(now, QUIET, POW, True) == "full", "AI播放期不应超时"
+assert w.feed_decision(now, QUIET, POW, True) == "full", "应答期（LLM思考/TTS播放）不应超时"
 assert w.state == ACTIVE
 w2 = WakeSession(wake_enabled=False, inactive_timeout=0)
 w2.last_activity = now - 100000.0
 assert w2.feed_decision(now, QUIET, POW, False) == "full", "inactive_timeout=0 永不超时"
-print("测试6 busy/0超时 OK: AI播放期不判超时, 0=关闭自动休眠")
+print("测试6 engaged/0超时 OK: 应答期不判超时, 0=关闭自动休眠")
+
+# ---- 6b. 应答期刷新静默计时：慢查询后不立刻超时（实测根因）----
+# 用户问天气 → LLM（agent 跑脚本）想 100s → 刚答完，不该紧跟"退下"告别语
+w = WakeSession(wake_enabled=False, inactive_timeout=60)
+now = 3000.0
+w.last_activity = now - 10.0                            # 最近一次语音在 10s 前
+for t in range(1, 101):                                 # 模拟 LLM 慢答 100s，无用户语音
+    assert w.feed_decision(now + t, QUIET, POW, True) == "full", \
+        "应答中静默不算超时 (t=%d)" % t
+assert w.state == ACTIVE, "慢答全程不应回休眠"
+# 答完（engaged=False）后计时已被应答期刷新 → 静默 10s/50s 仍不超时
+assert w.feed_decision(now + 101.0, QUIET, POW, False) == "full"
+assert w.feed_decision(now + 151.0, QUIET, POW, False) == "full", "答完计时从应答末刷新"
+# 真正的 60s 静默 → 才回休眠
+assert w.feed_decision(now + 162.0, QUIET, POW, False) == "none"
+assert w.state == SLEEP
+print("测试6b 应答期刷新计时 OK: 慢答100s不超时, 答完60s静默才回休眠")
 
 # ---- 7. note_partial：对话期刷新 / 休眠期忽略 ----
 w = WakeSession(wake_enabled=True, inactive_timeout=60)

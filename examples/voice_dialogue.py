@@ -358,6 +358,15 @@ def main():
                          "不带则新建会话（旧的仍在，随时可再续）")
     ap.add_argument("--agent-model", default=None,
                     help="agent 用模型（默认 claude 配置的模型；一般不需要设）")
+    ap.add_argument("--agent-thinking", type=int, default=0,
+                    help="agent 思考预算（默认 0=关闭）：模型走方舟 ark-code-latest 且 CLI 不识别"
+                         "（unrecognized_model）时会按超大默认 thinking 预算先\"想\"约 45s 才开口，"
+                         "实测关闭后同查询 48.8s→1.9s（2026-09-10）。语音助手延迟优先，默认关；"
+                         "要思考质量可给预算值（如 2048）")
+    ap.add_argument("--agent-query-timeout", type=float, default=90.0,
+                    help="agent 单回合看门狗超时（秒，默认 90）：超时仍无结果 → 中断该回合并报"
+                         "“× LLM 出错：agent 超时”，不再无限挂起（曾实测 resumed 会话被中断"
+                         "残留污染后静默 2-3 分钟无任何事件）")
     ap.add_argument("--agent-permission-mode",
                     choices=["default", "acceptEdits", "plan", "bypassPermissions",
                              "dontAsk", "auto"], default="default",
@@ -414,6 +423,8 @@ def main():
             resume=args.agent_resume,
             model=args.agent_model,
             permission_mode=args.agent_permission_mode,
+            max_thinking_tokens=args.agent_thinking,
+            query_timeout=args.agent_query_timeout,
             debug=args.debug,
         )
         print("[agent] 大脑=本地 claude 常驻会话（dir=%s%s）"
@@ -652,8 +663,12 @@ def main():
             return
 
         # ---- 对话中 ----
+        # busy：回声门控用（是否在播 TTS，开 gate 才生效）。
+        # engaged：静默超时判定用（系统是否正在应答 = LLM 读流在途 或 TTS 播放）。
+        #   必须用 turn_active 而非 tts_busy——否则 LLM 慢思考期间（如 agent 跑天气脚本，
+        #   无音频在播）用户不说话会被误判"静默超时"回休眠，答完立刻播"退下"告别语。
         busy = bool(args.echo_gate and ctrl.tts_busy)
-        decision = wake.feed_decision(now, rms2, SPEECH_POW, busy)
+        decision = wake.feed_decision(now, rms2, SPEECH_POW, ctrl.turn_active)
         if decision == "none":                     # 静默超时 → 已回休眠
             ctrl.hard_stop()                       # 清理在途 LLM/TTS（已 commit 历史保留）
             # 告别语是 feed_decision 内部 go_sleep 暂存的，必须取走播放——
