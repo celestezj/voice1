@@ -130,7 +130,7 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
 | 新增 | `assistant/CLAUDE.md` | 人格（口语化、【心态】标记、【询问】权限规则、技能指引）——独立目录，不进 voice1 工程 CLAUDE.md | ✅ |
 | 新增 | `assistant/.mcp.json`、`assistant/.claude/skills/` | 开灯/天气等能力（按需） | ✅ 骨架 |
 | 修改 | `dialogue/controller.py` | `agent` 构造参数；agent 模式旁路 `_build_messages`/压缩/系统提示；`【询问】`送 TTS 剥掉不念（`_ASK_RE`）；`abort()` 钩子（hard_stop / barge） | ✅ |
-| 修改 | `examples/voice_dialogue.py` | `--brain` / `--agent-resume` / `--agent-dir` / `--agent-model` / `--agent-permission-mode` 参数 + 接线 | ✅ |
+| 修改 | `examples/voice_dialogue.py` | `--brain` / `--agent-resume` / `--agent-dir` / `--agent-model` / `--agent-permission-mode` / `--agent-thinking` / `--agent-query-timeout` 参数 + 接线 | ✅ |
 | 修改 | `docs/voice-dialogue.md` + 根 `CLAUDE.md` | 文档 | ✅ |
 | 新增 | `tmp/test_agent_flow.py`（gitignored） | agent 全链路集成测试：多轮上下文/partial/abort/【询问】/barge | ✅ |
 | 不动 | mic / wake / llm.py 现有路径 | 开关关闭时零影响 | ✅（回归 13 项全过） |
@@ -171,6 +171,23 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
   是模型在脚本被拒/失败时退到"用网页查"的兜底，放行避免二次拒绝。
   安全性：放行 PowerShell/Bash = agent 可在本机执行任意命令，系统硬门消失，只剩人格【询问】
   这层社交许可；更严的语音级工具授权（`can_use_tool` 钩子 + 语音确认）留作后续。
+- **agent 延迟治理（2026-09-10 实测）**：天气/普通查询曾"几分钟不回复"，根因有二——
+  ① **未关思考预算**：模型走方舟 `ark-code-latest`，CLI 不认识它（stderr
+  `[claude-code:unrecognized_model]`）→ 按超大默认 thinking 预算先"想"约 45s 才开口。
+  实测同一查询：thinking 开 = 48.8s，`max_thinking_tokens=0` 关 = 1.9s。agent.py 默认
+  关（`--agent-thinking <预算>` 可重开，如 2048 换质量）；② **被中断残留污染的 resumed 会话**
+  （上一进程 mid-query 被杀/退出时 close 没 interrupt 在途回合）→ resume 后每步静默 2-3 分钟。
+  治理三件套（agent.py 已落地）：
+  - **看门狗** `--agent-query-timeout`（默认 90s）：`_do_query` 用 `asyncio.wait_for` 包
+    receive 循环，整轮超时仍无 `ResultMessage` → `interrupt()`（ESC）+ 抛 TimeoutError →
+    worker 报错给 controller → 控制台 "× LLM 出错：agent 超时"，**绝不无限挂起**；
+  - **stderr 环形缓存**（`_stderr_buf`，300 行）：`stderr` 不再 `lambda line: None` 全吞，
+    报错/超时时 `_notify_error` dump 最近 15 行（`[agent] CLI 最近输出：…`），`--debug` 则实时
+    打印 `[agent-cli]` —— 曾因全吞查不出卡因；
+  - **`close()` 先直接 interrupt 在途回合**（不经队列——worker 若卡在 receive 处理不了
+    `("close",)`），保证 CLI 回合干净收尾、不留脏回合给下次 resume。
+  遇 agent 卡死/疑似会话污染：删 `sessions/agent_session_id.txt` 换全新会话（病会话删除即弃，
+  别 `--agent-resume` 续它）。
 
 ## 技术风险 / 待验证点
 

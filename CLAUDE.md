@@ -122,6 +122,15 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自
   SDK `StreamEvent.content_block_delta.text_delta`（不是 AssistantMessage）；多轮 query 间
   须 drain 到 ResultMessage 再发下一条（打断残留消息会污染下一轮 receive）。
+  **agent 延迟治理（2026-09-10 实测）**：① **默认关思考**（`max_thinking_tokens=0`）——
+  模型走方舟 `ark-code-latest` 且 CLI 不识别（stderr 见 `unrecognized_model`）时按超大默认
+  thinking 预算先"想"约 45s 才开口，实测同查询关 thinking 后 48.8s→1.9s；要思考质量用
+  `--agent-thinking <预算>`（如 2048）。② **单回合看门狗** `--agent-query-timeout`（默认 90s）：
+  receive 等 ResultMessage 超时 → 中断回合并报 "× LLM 出错：agent 超时"，**绝不无限挂起**
+  （曾实测 resumed 会话被中断残留污染后静默 2-3 分钟无任何事件）。③ stderr 环形缓存 + 报错
+  时 dump `[agent-cli]` 最近输出（不再全吞，诊断超时/报错可查）。④ `close()` 先直接 interrupt
+  在途回合，**不留脏回合给下次 resume**（中断残留会污染下一轮 receive）——遇 agent 卡死/
+  会话疑似被污染，删 `sessions/agent_session_id.txt` 换全新会话（病会话删除即弃）。
 - **本地会话存档（默认开，仅 LLM 模式）**：`--history-dump` / `--history-dump-dir`（默认
   `sessions/`，已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把
   `ctrl.snapshot()` 的**完整对话状态**（system+summary+history+进行中内容）原子覆盖写到

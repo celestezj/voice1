@@ -15,6 +15,11 @@ agent 模式的大脑：controller 把 ASR 文本交给它，它把 agent 的**�
   读文件内容显式传 `system_prompt`。
 - **跨进程续会话**：session_id（UUID）落盘（默认 sessions/agent_session_id.txt，
   已 gitignore），重启带 `resume=True` 续上次上下文（对应 `claude --resume`）。
+- **延迟治理（2026-09-10 实测）**：① `max_thinking_tokens=0` 关思考预算——模型走方舟
+  `ark-code-latest` 且 CLI 不识别（`unrecognized_model`）时按超大默认 thinking 先"想"约 45s，
+  实测关掉后同查询 48.8s→1.9s；② `_do_query` 带看门狗超时（`query_timeout`，默认 90s），
+  超时中断回合并报错，绝不无限挂起；③ stderr 环形缓存 + 报错时 dump，不再全吞；④
+  `close()` 先直接 interrupt 在途回合，不留脏回合给下次 resume。
 
 线程模型：本类持有**常驻 asyncio 事件循环线程**。`submit()/abort()/close()` 线程安全
 （`asyncio.run_coroutine_threadsafe` 桥接；内部 worker 串行化，保证一次只有一个 query
@@ -25,6 +30,7 @@ import asyncio
 import os
 import threading
 import uuid
+from collections import deque
 
 from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions,
                               AssistantMessage, ResultMessage, StreamEvent)
@@ -62,6 +68,7 @@ class ClaudeAgentClient:
                  resume=False, permission_mode="default", allowed_tools=None,
                  disallowed_tools=None, model=None, connect_timeout=90.0,
                  include_partial_messages=True,
+                 max_thinking_tokens=0, query_timeout=90.0,
                  on_result=None, on_partial=None, on_error=None, debug=False):
         self._cwd = cwd or _DEFAULT_AGENT_DIR
         self._persona_file = persona_file or os.path.join(self._cwd, _DEFAULT_PERSONA_FILE)
@@ -74,6 +81,15 @@ class ClaudeAgentClient:
         self._model = model
         self._connect_timeout = connect_timeout
         self._include_partial = bool(include_partial_messages)
+        # 思考预算（默认 0=关闭）：模型走方舟 ark-code-latest 且 CLI 不认识它
+        # （stderr 见 [claude-code:unrecognized_model]）→ 按超大默认 thinking 预算先"想"
+        # 约 45s 才开口，实测同查询关 thinking 后 48.8s→1.9s（2026-09-10 复现）。
+        # 语音助手延迟优先，默认关；要质量可给预算值（如 2048）。
+        self._max_thinking_tokens = int(max_thinking_tokens)
+        # 单回合看门狗（秒）：receive 等 ResultMessage 超时 → 中断并报错，绝不无限挂起
+        # （曾实测 resumed 会话被中断残留污染后静默 2-3 分钟无任何事件）。
+        self._query_timeout = float(query_timeout)
+        self._stderr_buf = deque(maxlen=300)     # CLI 输出环形缓存（诊断盲区兜底）
         self._on_result = on_result
         self._on_partial = on_partial
         self._on_error = on_error
@@ -164,6 +180,14 @@ class ClaudeAgentClient:
 
     async def _connect(self):
         persona = self._load_persona()
+
+        def _stderr_sink(line):
+            # 环形缓存 CLI 输出（曾全吞导致查不出卡因）：默认不刷屏，
+            # 报错/超时时 _notify_error 会 dump 尾部；--debug 则实时打印。
+            self._stderr_buf.append(line)
+            if self._debug:
+                print("[agent-cli]", line, flush=True)
+
         opts = ClaudeAgentOptions(
             cwd=self._cwd,
             system_prompt=persona,                     # cwd 的 CLAUDE.md 不自动加载，须显式传
@@ -174,7 +198,8 @@ class ClaudeAgentClient:
             disallowed_tools=self._disallowed_tools,
             model=self._model,
             include_partial_messages=self._include_partial,  # True：控制台流式出字；TTS 仍取最终结论
-            stderr=(lambda line: None),                # 静默框架噪音（tqdm/错误不回刷屏）
+            max_thinking_tokens=self._max_thinking_tokens,  # 关默认超大思考预算（真凶，见 __init__）
+            stderr=_stderr_sink,                        # 缓存 + 可选打印，不再吞
         )
         self._client = ClaudeSDKClient(options=opts)
         await self._client.connect()
@@ -187,14 +212,25 @@ class ClaudeAgentClient:
                   flush=True)
 
     def close(self):
-        """优雅关闭：断开 claude（进程正常结束）+ 停循环线程。"""
+        """优雅关闭：中断在途回合 + 断开 claude + 停循环线程。
+
+        先**直接 interrupt**（不经队列）——worker 若卡在 receive_response 里根本处理不了
+        ("close",)；直接 ESC 保证 CLI 回合干净收尾，**不留脏回合给下次 resume**
+        （中断残留污染下一轮 receive 的实测根因，曾致 resumed 会话静默 2-3 分钟）。
+        """
         if self._closed:
             return
         self._closed = True
+        if self._loop is not None and self._client is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(self._client.interrupt(),
+                                                 self._loop).result(timeout=3)
+            except Exception:
+                pass
         if self._loop is not None and self._pending is not None:
             try:
                 asyncio.run_coroutine_threadsafe(self._pending.put(("close",)),
-                                                 self._loop).result(timeout=5)
+                                                 self._loop).result(timeout=3)
             except Exception:
                 pass
         if self._loop_thread is not None and self._loop_thread.is_alive():
@@ -281,26 +317,43 @@ class ClaudeAgentClient:
 
     async def _do_query(self, text, ctx):
         await self._client.query(text, session_id=self._session_id)
-        async for msg in self._client.receive_response():
-            if isinstance(msg, StreamEvent) and self._on_partial is not None \
-                    and self._include_partial:
-                # 流式增量：include_partial_messages=True 时 CLI 发原始 Anthropic
-                # API 流事件，文本增量在 content_block_delta.text_delta（实测格式）。
-                # 逐段回调给上层做控制台流式出字；TTS 仍只取最终结论（ResultMessage）。
-                ev = msg.event
-                if (isinstance(ev, dict) and ev.get("type") == "content_block_delta"):
-                    d = ev.get("delta") or {}
-                    # 跳过纯空白增量（\n 等）：agent 常逐段吐换行，若不过滤，
-                    # \n 也会触发一次控制台原地刷新 + 换行文本反复重写 = 刷屏
-                    if (d.get("type") == "text_delta" and d.get("text")
-                            and d["text"].strip()):
-                        try:
-                            self._on_partial(ctx, d["text"])
-                        except Exception:
-                            pass
-            elif isinstance(msg, ResultMessage):
-                self._notify_result(ctx, msg.result, bool(msg.is_error))
-                break
+        timeout = self._query_timeout
+
+        async def _drain():
+            """迭代本回合响应流直到 ResultMessage（流式出字 + 最终结论回调）。"""
+            async for msg in self._client.receive_response():
+                if isinstance(msg, StreamEvent) and self._on_partial is not None \
+                        and self._include_partial:
+                    # 流式增量：include_partial_messages=True 时 CLI 发原始 Anthropic
+                    # API 流事件，文本增量在 content_block_delta.text_delta（实测格式）。
+                    # 逐段回调给上层做控制台流式出字；TTS 仍只取最终结论（ResultMessage）。
+                    ev = msg.event
+                    if (isinstance(ev, dict) and ev.get("type") == "content_block_delta"):
+                        d = ev.get("delta") or {}
+                        # 跳过纯空白增量（\n 等）：agent 常逐段吐换行，若不过滤，
+                        # \n 也会触发一次控制台原地刷新 + 换行文本反复重写 = 刷屏
+                        if (d.get("type") == "text_delta" and d.get("text")
+                                and d["text"].strip()):
+                            try:
+                                self._on_partial(ctx, d["text"])
+                            except Exception:
+                                pass
+                elif isinstance(msg, ResultMessage):
+                    self._notify_result(ctx, msg.result, bool(msg.is_error))
+                    return
+
+        try:
+            await asyncio.wait_for(_drain(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # 看门狗：整轮超时仍无 ResultMessage → 中断当前回合并报错，绝不无限挂起
+            # （曾实测 resumed 会话被中断残留污染后静默 2-3 分钟无任何事件）。
+            try:
+                await self._client.interrupt()      # ESC：让 CLI 干净收尾当前回合
+            except Exception:
+                pass
+            raise TimeoutError(
+                "agent 超时（%.0fs 无结果，已中断当前回合）。可查控制台 [agent-cli] "
+                "最近输出诊断" % timeout)
 
     def _notify_result(self, ctx, text, is_error):
         if self._on_result is not None:
@@ -310,6 +363,10 @@ class ClaudeAgentClient:
                 print("[agent] on_result 异常: %s" % e, flush=True)
 
     def _notify_error(self, exc):
+        # dump CLI 最近输出（stderr 环形缓存）：报错/超时时带上，诊断盲区兜底
+        if self._stderr_buf:
+            tail = "\n".join(list(self._stderr_buf)[-15:])
+            print("[agent] CLI 最近输出（诊断超时/报错）：\n%s" % tail, flush=True)
         if self._on_error is not None:
             try:
                 self._on_error(exc)
