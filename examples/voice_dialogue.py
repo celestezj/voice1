@@ -367,6 +367,9 @@ def main():
                     help="agent 单回合看门狗超时（秒，默认 90）：超时仍无结果 → 中断该回合并报"
                          "“× LLM 出错：agent 超时”，不再无限挂起（曾实测 resumed 会话被中断"
                          "残留污染后静默 2-3 分钟无任何事件）")
+    ap.add_argument("--no-mcp", action="store_true",
+                    help="不挂任何 MCP（默认自动读 agent 目录/.mcp.json 全量启用）。"
+                         "要只关某一个 MCP，直接改 .mcp.json 删掉那段即可，不必加参数")
     ap.add_argument("--agent-permission-mode",
                     choices=["default", "acceptEdits", "plan", "bypassPermissions",
                              "dontAsk", "auto"], default="default",
@@ -425,6 +428,7 @@ def main():
             permission_mode=args.agent_permission_mode,
             max_thinking_tokens=args.agent_thinking,
             query_timeout=args.agent_query_timeout,
+            disable_mcp=args.no_mcp,
             debug=args.debug,
         )
         print("[agent] 大脑=本地 claude 常驻会话（dir=%s%s）"

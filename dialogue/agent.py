@@ -27,7 +27,9 @@ agent 模式的大脑：controller 把 ASR 文本交给它，它把 agent 的**�
 不能阻塞循环——controller 侧只做持锁快操作。
 """
 import asyncio
+import json
 import os
+import sys
 import threading
 import time
 import uuid
@@ -70,6 +72,7 @@ class ClaudeAgentClient:
                  disallowed_tools=None, model=None, connect_timeout=90.0,
                  include_partial_messages=True,
                  max_thinking_tokens=0, query_timeout=90.0,
+                 disable_mcp=False,        # True=不挂任何 MCP；默认读 <agent 目录>/.mcp.json 全部挂上
                  on_result=None, on_partial=None, on_error=None, debug=False):
         self._cwd = cwd or _DEFAULT_AGENT_DIR
         self._persona_file = persona_file or os.path.join(self._cwd, _DEFAULT_PERSONA_FILE)
@@ -90,6 +93,10 @@ class ClaudeAgentClient:
         # 单回合看门狗（秒）：receive 等 ResultMessage 超时 → 中断并报错，绝不无限挂起
         # （曾实测 resumed 会话被中断残留污染后静默 2-3 分钟无任何事件）。
         self._query_timeout = float(query_timeout)
+        # MCP：默认从 <agent 目录>/.mcp.json 自动发现全部 server（和 Claude Code 同一配置来源），
+        # 新 MCP 只需往 .mcp.json 加一段，无需改码/加参数；disable_mcp=True 则一律不挂
+        # （要只关某一个，直接改 .mcp.json 删掉那段即可）。
+        self._disable_mcp = bool(disable_mcp)
         self._stderr_buf = deque(maxlen=300)     # CLI 输出环形缓存（诊断盲区兜底）
         self._on_result = on_result
         self._on_partial = on_partial
@@ -179,6 +186,40 @@ class ClaudeAgentClient:
             except Exception:
                 pass
 
+    def _build_mcp_servers(self):
+        """组装要挂给 claude 会话的 MCP server 配置。
+
+        默认源 = <agent 目录>/.mcp.json（与 Claude Code 同一套配置），新增 MCP 往里加一段即可，
+        无需改代码/加参数；要只关某一个，直接删 .mcp.json 里那段。`--no-mcp`（disable_mcp=True）
+        则整个 MCP 功能都不挂。`command` 若是 python/python3/pythonw/py 统一换成跑本 agent 的
+        python（voice-asr），避免 Windows 上 conda/base 串包；非 python 命令（node 等）原样保留。
+        """
+        if self._disable_mcp:
+            return None
+        cfg_path = os.path.join(self._cwd, ".mcp.json")   # 例：assistant/.mcp.json
+        raw = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    raw = json.load(f).get("mcpServers", {}) or {}
+            except Exception as e:
+                print("[agent] 读取 MCP 配置失败 %s：%s" % (cfg_path, e), flush=True)
+        selected = {}
+        for name, cfg in (raw or {}).items():
+            cfg = dict(cfg)
+            cmd = (cfg.get("command") or "").strip().lower()
+            if cmd in ("python", "python3", "pythonw", "py"):
+                cfg["command"] = sys.executable
+            # 相对 args 视为相对 agent 目录（.mcp.json 所在处），写成绝对路径，跟启动目录解耦
+            # （防从别处 `python voice_dialogue.py` 时 MCP 子进程找不到脚本）。
+            args = cfg.get("args") or []
+            cfg["args"] = [os.path.abspath(os.path.join(self._cwd, a)) if a and not os.path.isabs(a)
+                           and not a.startswith("-") else a for a in args]
+            selected[name] = cfg
+        if self._debug:
+            print("[agent] MCP servers: %s" % (", ".join(selected) or "（无）"), flush=True)
+        return selected or None
+
     async def _connect(self):
         persona = self._load_persona()
 
@@ -189,6 +230,8 @@ class ClaudeAgentClient:
             if self._debug:
                 print("[agent-cli]", line, flush=True)
 
+        mcp_servers = self._build_mcp_servers()
+
         opts = ClaudeAgentOptions(
             cwd=self._cwd,
             system_prompt=persona,                     # cwd 的 CLAUDE.md 不自动加载，须显式传
@@ -197,6 +240,7 @@ class ClaudeAgentClient:
             permission_mode=self._permission_mode,
             allowed_tools=self._allowed_tools,
             disallowed_tools=self._disallowed_tools,
+            mcp_servers=mcp_servers,                     # 见 _build_mcp_servers（默认 .mcp.json 全量）
             model=self._model,
             include_partial_messages=self._include_partial,  # True：控制台流式出字；TTS 仍取最终结论
             max_thinking_tokens=self._max_thinking_tokens,  # 关默认超大思考预算（真凶，见 __init__）
