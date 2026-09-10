@@ -231,6 +231,14 @@ class ClaudeAgentClient:
                 print("[agent-cli]", line, flush=True)
 
         mcp_servers = self._build_mcp_servers()
+        # MCP 工具名是动态的（mcp__<server>__<tool>），静态白名单覆盖不到——SDK 会话无
+        # 交互终端，permission_mode=default 下未预放行的工具调用会被自动拒绝（与当初
+        # shell 被拦同因，agent 只会说"工具没放行"）。按启用的 server 名补
+        # `mcp__<name>__*` 模式自动放行：只放行 .mcp.json 里实际配的 server、不放开
+        # 用户全局 MCP；新增 MCP 无需改码（server 名来自 json 键）。
+        allowed_tools = list(self._allowed_tools)
+        if mcp_servers:
+            allowed_tools += ["mcp__%s__*" % name for name in mcp_servers]
 
         opts = ClaudeAgentOptions(
             cwd=self._cwd,
@@ -238,7 +246,7 @@ class ClaudeAgentClient:
             session_id=None if self._resume else self._session_id,
             resume=self._session_id if self._resume else None,
             permission_mode=self._permission_mode,
-            allowed_tools=self._allowed_tools,
+            allowed_tools=allowed_tools,
             disallowed_tools=self._disallowed_tools,
             mcp_servers=mcp_servers,                     # 见 _build_mcp_servers（默认 .mcp.json 全量）
             model=self._model,

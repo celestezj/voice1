@@ -117,6 +117,8 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `_DEFAULT_ALLOWED_TOOLS`，SDK 无终端须预放行技能才能跑；**Windows 两个 shell 都能跑**——
   模型可能走 Bash（读了 SKILL.md 的 `bash fetch.sh`）也可能走 PowerShell，**当初只放行
   PowerShell 导致走 Bash 的会话报"脚本被拦住了"（天气查不到根因）**，故双 shell 都放行）；
+  **MCP 工具自动放行**：启用 MCP 时按 `.mcp.json` 实际 server 名自动补 `mcp__<name>__*`
+  白名单（只放行配置的 server，新增 MCP 无需改码）；`--no-mcp` 可整体不挂 MCP）；
   `--agent-resume` 续上次会话
   （session_id 落盘 `sessions/agent_session_id.txt`）。默认 `--brain llm` 时现有 LLM 集成
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自

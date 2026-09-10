@@ -171,6 +171,12 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
   是模型在脚本被拒/失败时退到"用网页查"的兜底，放行避免二次拒绝。
   安全性：放行 PowerShell/Bash = agent 可在本机执行任意命令，系统硬门消失，只剩人格【询问】
   这层社交许可；更严的语音级工具授权（`can_use_tool` 钩子 + 语音确认）留作后续。
+- **MCP 工具自动放行（2026-09-10）**：MCP 工具名是动态的（`mcp__<server>__<tool>`），静态
+  `_DEFAULT_ALLOWED_TOOLS` 覆盖不到——default 模式下未预放行的 MCP 工具会被自动拒绝（agent
+  只会说"查XX的工具没放行/被拦住了"）。`agent.py` `_connect` 在启用 MCP 时按 `.mcp.json` 里
+  实际的 server 名自动补 `mcp__<name>__*` 白名单模式（只放行配置的 server，不放开用户全局
+  MCP；新增 MCP 无需改码，server 名即 json 键）。实测金价 MCP 放行后 agent 直接调
+  `get_gold_history` 拿真实数据、不再报被拦。
 - **agent 延迟治理（2026-09-10 实测）**：天气/普通查询曾"几分钟不回复"，根因有二——
   ① **未关思考预算**：模型走方舟 `ark-code-latest`，CLI 不认识它（stderr
   `[claude-code:unrecognized_model]`）→ 按超大默认 thinking 预算先"想"约 45s 才开口。
