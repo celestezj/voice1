@@ -136,6 +136,12 @@ class RealtimeASR:
 
     # ------------------------------------------------------------------ 生命周期
 
+    @property
+    def session_t0(self):
+        """会话起点（monotonic 秒）：ASR 句时间戳（audio_start/audio_end）的同一坐标轴。
+        AI 回复侧想与「[225.19-226.59s] 用户句」对齐时，用 time.monotonic() - asr.session_t0。"""
+        return self._t0
+
     def on_sentence(self, callback):
         """设置句子完成回调 `cb(result: SentenceResult)`。返回旧回调。"""
         old = self._cb

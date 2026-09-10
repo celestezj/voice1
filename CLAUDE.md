@@ -185,7 +185,13 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   绝不阻塞识别；锁序固定 `controller._lock(RLock) → tts._submit_lock`（RLock 因 finally
   在锁内 `_submit_tts` 会重入）。TTS 默认 `mode="queue"` 非打断。
 - **控制台诊断标记**（区分「没提交 / LLM 卡住 / LLM 出错」）：`_Console` 三态行——
-  `… `前缀=ASR 流式出字**未定稿**（不会提交）；`[ts-ts]`=定稿句已提交给 LLM；
+  `… `前缀=ASR 流式出字**未定稿**（不会提交）；`[ts-ts]`=定稿句已提交给 LLM，
+  **`[ts] AI: …`=本轮首个 AI 回复句**也附时刻（**首 token/AI 开口时刻**，**锚在用户问题
+  定稿时刻上**：`问题audio_end + (此刻 − 问题提交时刻)`——与用户句 [x.xx-y.yys] 天然
+  同一坐标轴、不受引擎会话起点影响，曾见用 `asr.session_t0` 差出 ~35s 错位，锚定后
+  不可能再跑偏；用开口时刻而非定稿时刻——agent 文本到齐与送 TTS 间可能有桥接延迟，
+  定稿时刻会把它算进时间戳造成误读；同轮后续 AI 句不重复打时间；新用户句/撤答复重答
+  时复位）；
   `→ LLM 请求中…`=LLM 请求已发出等首 token（controller `on_llm_start`，首 delta 原地覆盖）；
   `× LLM 出错`=流抛异常（`on_llm_error`）；`[门控]`=回声门控转换提示
   （AI 播放期 mic 只听"停下"，此刻说话不被识别——离远/音量低时 VAD 不闭句，句子

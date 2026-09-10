@@ -533,17 +533,50 @@ def main():
             # "… "前缀 = 仍在出字、未定稿（不会提交）；定稿后 on_user 的时间戳覆盖它
             con.update("asr", "… " + p.text)
 
+    q_audio_end = [0.0]          # 本轮用户问题定稿时刻（audio 轴 = 用户句 [x.xx-y.yys] 的 y）
+    q_wall = [None]              # 本轮问题提交时刻（monotonic，算首答时差用）
+    first_ai_ts = [None]         # 本轮首个 AI 文本（首 delta）的会话轴时刻；打印过即置 None
+    ai_ts_printed = [False]      # 本轮是否已给首答打过时间（同轮后续句不重复打）
+
+    def _ai_answer_ts(now):
+        """首答时刻（会话轴秒）——**锚在用户问题定稿时刻上**：
+        问题结束时刻 + (此刻 − 问题提交时刻)。这样与用户句 [x.xx-y.yys] 天然同轴，
+        不受引擎会话起点（session_t0）影响。曾见用 `time.monotonic()-session_t0`
+        差出 ~35s 的错位（音频 3s 就到、时间戳却打 112s），锚定后数学上不可能再跑偏。
+        """
+        if q_wall[0] is not None:
+            return q_audio_end[0] + (now - q_wall[0])
+        return now - asr.session_t0          # 兜底：无前序问题（理论上不会）
+
     def on_user(r):
+        q_audio_end[0] = r.audio_end      # 锚点：问题定稿时刻（用户句轴）
+        q_wall[0] = time.monotonic()
+        first_ai_ts[0] = None             # 新用户问题 → 下一轮 AI 首答重新计时
+        ai_ts_printed[0] = False
         con.finalize("asr", "[%.2f-%.2fs] %s"
                      % (r.audio_start, r.audio_end, r.text))
 
     def on_ai_delta(_delta, full):
+        if first_ai_ts[0] is None:
+            # 首 token：AI 开口时刻（用户体感的"首次回答"），锚在用户问题轴上；
+            # 用开口时刻而非定稿时刻——agent 文本到齐与送 TTS 之间可能有桥接延迟，
+            # 定稿时刻会把这段延迟算进时间戳。
+            first_ai_ts[0] = _ai_answer_ts(time.monotonic())
         con.update("ai", "AI: " + full)             # AI 流式：原地刷新（含【心态：xxx】标记）
 
     def on_ai_sentence(_s):
         # 这句已送 TTS（开播）→ 用完整句子定稿一行（agent 模式整段回复切多句时，
         # 每句独立成行显示，而不是只留最后那次截断预览）
-        con.finalize("ai", "AI: " + _s)
+        # 本轮**首个**回复句附上首答时刻（首 delta 捕获，与用户句 [x.xx-y.yys] 同轴）；
+        # 兜底无流式（理论上不会）→ 用定稿时刻。同轮后续句不再重复打时间。
+        if not ai_ts_printed[0]:
+            ai_ts_printed[0] = True
+            ts = first_ai_ts[0]
+            if ts is None:
+                ts = _ai_answer_ts(time.monotonic())   # 兜底无流式（理论上不会）
+            con.finalize("ai", "[%.2fs] AI: %s" % (ts, _s))
+        else:
+            con.finalize("ai", "AI: " + _s)
 
     def on_llm_start():
         # 定稿句 → LLM 请求已发出（等待首 token）；首 delta 到来时被 "AI: " 原地覆盖
@@ -554,6 +587,8 @@ def main():
 
     def on_merge_rollback():
         # post-commit barge：AI 已答完但音频未开播，用户补了尾巴 → 撤答复重答
+        first_ai_ts[0] = None      # 撤掉的重答也打首答时间（真正站得住的答复）
+        ai_ts_printed[0] = False
         con.status("[合并] 撤回了刚才的答复，正在重答完整问题…")
 
     def on_mood(mood):

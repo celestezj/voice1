@@ -29,6 +29,7 @@ agent 模式的大脑：controller 把 ASR 文本交给它，它把 agent 的**�
 import asyncio
 import os
 import threading
+import time
 import uuid
 from collections import deque
 
@@ -321,6 +322,8 @@ class ClaudeAgentClient:
 
         async def _drain():
             """迭代本回合响应流直到 ResultMessage（流式出字 + 最终结论回调）。"""
+            t0 = time.monotonic()
+            first_txt = None
             async for msg in self._client.receive_response():
                 if isinstance(msg, StreamEvent) and self._on_partial is not None \
                         and self._include_partial:
@@ -334,11 +337,25 @@ class ClaudeAgentClient:
                         # \n 也会触发一次控制台原地刷新 + 换行文本反复重写 = 刷屏
                         if (d.get("type") == "text_delta" and d.get("text")
                                 and d["text"].strip()):
+                            if first_txt is None:
+                                first_txt = time.monotonic()
+                                if self._debug:
+                                    print("[agent] 首文本 %.1fs（query 发出后）" % (first_txt - t0),
+                                          flush=True)
                             try:
                                 self._on_partial(ctx, d["text"])
                             except Exception:
                                 pass
                 elif isinstance(msg, ResultMessage):
+                    # 延迟探针（--debug）：区分「agent 生成慢」vs「文本已出但 ResultMessage
+                    # 被 CLI 扣住」——曾见文本 2.9s 就到、ResultMessage 却晚 35s（桥接静默）。
+                    if self._debug:
+                        now = time.monotonic()
+                        print("[agent] ResultMessage 到达：整轮 %.1fs"
+                              % (now - t0), flush=True)
+                        if first_txt is not None:
+                            print("[agent]   首文本→ResultMessage 间隔 %.1fs（文本早到=CLI 扣结果）"
+                                  % (now - first_txt), flush=True)
                     self._notify_result(ctx, msg.result, bool(msg.is_error))
                     return
 
