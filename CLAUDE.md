@@ -70,7 +70,20 @@
 - **热词文件优先显式映射（T16）**：模糊目标行（单独一个词）对 2 字词会吞相邻同音字——"的神妙"（相似度 0.94）整窗替换删掉"的"、"必减少于"被"减少于"命中删掉"必"。精度要求高用 `错误词=>正确词` 显式映射（确定性零误伤），模糊目标仅兜底未知变体。
 - **FunASR generate 默认打 tqdm 进度条刷屏（rtf_avg: ...，T17d）**：`AutoModel.generate` 默认 `disable_pbar=False`，流式逐块刷屏（实时运行最烦人）。paraformer 后端全部 generate 调用传 `disable_pbar=not debug`，引擎把 `debug` 透传后端构造器——默认静默，`--debug` 才显示。**写新后端默认静默框架输出**，别让 tqdm/INFO 日志刷屏。
 - **VAD 是断句旋钮**：静音尾长 `vad_silence_tail_ms` 决定"这句说完"判定，是延迟-准确率权衡。**实测标定（T10）：默认 250ms**——实时尾字延迟达标、CER 0.059 逼近 5%；离线高精度用 600ms（CER 0.047 达标但延迟超标）。tail 小→句尾拖音幻听（"啊/嗯"等尾字）。无单一值同时达标，按场景选。
-- **麦克风电平够不着 VAD 门限 → "说话没反应"（T17c 实测）**：VAD 断句门限 -35dB，但不少麦克风说话 RMS 只有 -36~-46dB（本机 HD Audio 麦实测 6s 仅 24/300 帧过阈）——**录音正常、识别全无**。`check_mic_signal` 只拦"全哑（<-80dB）"拦不住这个。解法：record_mic 用 `MicAGC` 采集层自适应放大（目标 peak 0.3、只放大不压小、上限 8x；底噪放满仍 ~-50dB 不会误断句）。**引擎层故意不归一（T12d），mic 层负责**。排查 mic 无反应先跑 `tmp/probe_mic.py` 看电平与过阈帧数。
+- **麦克风电平够不着 VAD 门限 → "说话没反应"（T17c 实测）**：VAD 断句门限 -35dB，但不少麦克风说话 RMS 只有 -36~-46dB（本机 HD Audio 麦实测 6s 仅 24/300 帧过阈）——**录音正常、识别全无**。`check_mic_signal` 只拦"全哑（<-80dB）"拦不住这个。解法：record_mic 用 `MicAGC` 采集层自适应放大（目标 peak 0.3、只放大不压小、上限 24x）。**引擎层故意不归一（T12d），mic 层负责**。排查 mic 无反应先跑 `tmp/probe_mic.py` 看电平与过阈帧数。
+- **MicAGC v2：锁存噪声门控保证远距离句子能定稿 + 不切弱音节（2026-09 实测）**：旧 AGC
+  上限 8x + 快攻慢放有个隐性 bug——远距离说话把增益顶到上限，说话结束后增益停在原位，
+  房间底噪 ×8（+18dB）后 ≥ -35dB → VAD 把底噪当"还在说话"，静音尾永远凑不满 → 句子
+  永不定稿、只出 partial 不提交（"离远说完了还在等我"）。修法（分两步，第二步是用户
+  实测逼出来的）：①**锁存门控**——低于 `底噪×margin` 的块**持续 ≥120ms 才置零**（尾静音
+  真静音 → VAD 正常收句），说话时短暂弱音节（<120ms）不被切——初版"低于门限直接置零"
+  导致"距离一远文字出错/半截话"（弱音节被吞，实测 -42/-50 下旧硬门控 4 句全啃烂）；
+  ②**底噪只在锁存确认的真静音块上更新**（说话期间完全冻结）——低信噪比远距说话不会把
+  底噪估计慢慢抬进门限、把句子尾巴吞掉。上限提到 24x（门控保证底噪不被一起抬上去）。
+  门控同时让唤醒/打断 KWS 只看到干净语音。**SNR <~3dB 是门控下限**（语音均值低于门限，
+  无 AGC 也识别不清，属声学极限需靠近）。`--mic-gain` 可调上限（默认 24）。
+  `--vad-threshold-db` 调低是旧补救（更易误断句），一般不再需要。
+  **改 MicAGC 记得同步 `examples/record_mic.py` 的同源副本**。
 - **麦克风 16kHz / 模型 16kHz**：采样率与 voice0 TTS（44.1kHz）不同，两条链路各管各的。
 - **回声/双讲（AEC）**：若与 voice0 组合成语音对话，麦克风会收到喇叭声音，需回声消除。
 - **MeloTTS-Chinese 被切成 Xet 存储 → huggingface_hub 绕开缓存重下 208M（2026-08-29 实测）**：仓库启用 Xet 后，新版 huggingface_hub 把 xet 仓库当"未缓存"，即使权重完整躺在 voice0/.cache/hf 也重新下载 config.json+checkpoint.pth（hf-mirror ~70kB/s，卡 46 分钟）。修复：组合程序 import 前设 `HF_HOME=voice0/.cache/hf` **且** `HF_HUB_DISABLE_XET=1`（实测 0.55s 命中缓存零下载）。voice_dialogue/use_with_voice0_tts/test_e2e 已内置；写新的 voice0-melo 组合程序时别忘了这两行。
@@ -150,9 +163,9 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   默认"拜拜"）在 `on_sentence` 入口拦截（照常显示但不进历史/LLM）；静默超时
   `--inactive-timeout`（默认 60s）无用户语音 → 回休眠。**就绪/告别语走直连 `tts.submit`
   （不经 controller → 不入历史），其 Job 作"自播回声"门控**——自播期只喂"停下"，否则
-  "在的，我在听"会被识别成用户的话再提交一轮。唤醒 KWS 跑在 MicAGC 后（上限 8x），远距离
-  也能命中；`--wake-word ""` 关闭状态机（启动即对话旧行为），且**无唤醒检测器 → 永不自动
-  休眠**（休眠后无唤醒途径=死机）。静默超时告别语经 `wake.consume_farewell()` 由调用方播
+  "在的，我在听"会被识别成用户的话再提交一轮。唤醒 KWS 跑在 MicAGC 后（上限 24x + 噪声
+  门控），远距离也能命中、底噪不误触发；`--wake-word ""` 关闭状态机（启动即对话旧行为），
+  且**无唤醒检测器 → 永不自动休眠**（休眠后无唤醒途径=死机）。静默超时告别语经 `wake.consume_farewell()` 由调用方播
   （feed_decision 内部 go_sleep 的返回传不回调用方）。历史跨休眠保留（同次运行不清空，重启
   才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。详见
   `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」。
@@ -245,7 +258,7 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
                    agent 参数=agent 模式旁路历史/压缩/系统提示词，【询问】送 TTS 剥掉不念）/
                  agent.py（ClaudeAgentClient：--brain agent 大脑，claude-agent-sdk 常驻会话，
                    abort()=ESC、session_id 落盘、StreamEvent 流式出字）/
-                 mic.py（MicAGC/check_mic_signal/pick_input_device）/
+                 mic.py（MicAGC 自适应增益+噪声门控/check_mic_signal/pick_input_device）/
                  wake.py（WakeSession：休眠/对话两态状态机，唤醒/退出/静默超时，纯逻辑可测）/
                  live2d.py（Live2dEmitter：心态→表情 + 全 TTS 文本→说话框，启动测活+组合复位）/
                  say_tts.py（SayTTS：tts 代理，文本→说话框逐句链式跟播+一轮播完复位，纯逻辑可测）

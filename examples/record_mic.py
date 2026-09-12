@@ -7,7 +7,8 @@
 
 **麦克风自适应增益（MicAGC）**：VAD 断句门限 -35dB，不少麦克风说话电平只有
 -40dB 上下（录得到、但够不着门限 → "说话没反应"）。采集层自动放大到健康电平
-（目标 peak≈0.3，只放大不压小，上限 8x）。引擎层故意不归一，mic 层负责。
+（目标 peak≈0.3，只放大不压小，上限 24x）+ **噪声门控**（尾静音真静音 → 句子能
+定稿，远距离说话也能提交）。引擎层故意不归一，mic 层负责。
 
 用法（中文输出需 UTF-8 编码，Ctrl+C 退出）：
     PYTHONIOENCODING=utf-8 python examples/record_mic.py [--backend paraformer] [--device cuda] [--streaming] [--input-device <序号|名称>]
@@ -28,31 +29,78 @@ SR = 16000
 
 
 class MicAGC:
-    """麦克风自适应增益：把说话电平抬到 VAD/模型健康区间（目标 peak≈0.3）。
+    """麦克风自适应增益：说话放大到 VAD 健康区间 + **噪声门控保证句子能定稿**。
 
-    背景（T17c 实测）：VAD 断句门限 EnergyVAD.threshold_db = -35dB；本机 HD Audio
-    麦克风说话 RMS ≈ -36~-46dBFS，大多低于门限 → VAD 几乎不断句 →"对着麦说话没
-    反应"（录得到音、识别不到）。解法：放大到目标电平再喂引擎。
+    与 dialogue/mic.py 的 MicAGC 同源实现（voice_dialogue 主程序用 dialogue 版，
+    record_mic 独立副本）——改这边必须同步那边。
 
-    - 快攻慢放：以块峰值跟踪，说话立即抬增益，静音回落缓慢（防增益抽吸）；
-    - **只放大不压小**（min_gain=1x）：响亮麦克风原样通过，安静麦克风被抬升；
-    - 上限 8x（+18dB）：静音底噪即使放满也只有约 -50dB，仍低于 -35dB 门限，
-      不会把噪声底抬到误断句（T12d 噪声底抬高漏检的教训）。
+    背景（T17c + 2026-09 远距离实测）：VAD 断句门限 -35dB。v1 只解决"近距说话电平
+    够不着门限"（目标 peak 0.3、只放大不压小、上限 8x）。远距离（大客厅）实测两个问题：
+
+     ① 说话电平低 → 8x（+18dB）不够，远距说话放大后仍悬在门限附近；
+     ② **尾静音被 AGC 慢放放大 → 句子永不收尾**：说话结束后增益停在放大远距说话
+        所需的高位，房间底噪 × 高增益后 ≥ -35dB → VAD 把底噪当"还在说话"，静音尾
+        永远凑不满 → 句子永不定稿、只出 partial 不提交（"说完了还在等我继续输入"）。
+
+    修复：**锁存噪声门控**（自适应底噪 × margin 以下、**持续 ≥120ms** 才输出静音 →
+    尾静音真静音 → VAD 静音尾正常累计 → 句子正常定稿；说话时短暂弱音节不被切，避免
+    半截话）+ **底噪只在锁存确认的真静音块上更新**（说话不动底噪，门限不会涨到吞掉
+    句子尾巴）+ **上限提高到 24x**（远距说话能抬进门限）。保持"快攻慢放 + 只放大不压小"。
     """
-    def __init__(self, target_peak=0.3, max_gain=8.0, release=0.95):
+    def __init__(self, target_peak=0.3, max_gain=24.0, release=0.95,
+                 gate_margin=1.4, gate_floor_db=-58.0, gate_ceiling_db=-42.0,
+                 noise_init_db=-50.0, noise_down=0.3, noise_up=0.05,
+                 close_ms=120, sample_rate=16000):
         self._target = float(target_peak)
         self._max_gain = float(max_gain)
         self._release = float(release)
+        self._gate_margin = float(gate_margin)
+        self._gate_floor = 10.0 ** (gate_floor_db / 20.0)
+        self._gate_ceiling = 10.0 ** (gate_ceiling_db / 20.0)
+        self._sr = int(sample_rate)
+        self._close_ms = float(close_ms)
         self._peak = 1e-6
+        self._noise = 10.0 ** (noise_init_db / 20.0)
+        self._noise_down = float(noise_down)
+        self._noise_up = float(noise_up)
+        self._quiet_ms = 0.0
 
     def apply(self, block):
         x = np.asarray(block, dtype=np.float32)
         if len(x) == 0:
             return x
+        dur_ms = len(x) * 1000.0 / self._sr
+        rms = float(np.sqrt(np.mean(np.square(x)))) + 1e-12
+
+        # 噪声门限 = 底噪 × margin，夹在地板（太安静不误伤）与天花板（防说话自门）之间。
+        gate = min(max(self._gate_floor, self._noise * self._gate_margin),
+                   self._gate_ceiling)
+        below = rms < gate
+        if below:
+            self._quiet_ms += dur_ms
+        else:
+            self._quiet_ms = 0.0
+
+        if below and self._quiet_ms >= self._close_ms:
+            # 锁存确认的静音（真尾静音 / 环境底噪）→ 输出静音，并且**只有这里才更新底噪**
+            # 估计：说话期间的弱音节起伏即使低于门限也**不动底噪**——否则远距低信噪比说话
+            # 把底噪估计慢慢抬高 → 门限跟着涨 → 说着说着连句子尾巴也被吞（半截话）。底噪
+            # 更新只在"连续静音 ≥ 锁存时长"时发生，天然免疫说话。
+            if rms < self._noise:
+                self._noise += self._noise_down * (rms - self._noise)
+            else:
+                self._noise += self._noise_up * (rms - self._noise)
+            # 关键：说话结束后增益停在放大远距说话所需的高位，底噪若继续放大必过 -35dB
+            # 断句门限 → 句子永不收尾。锁存门控保证尾静音是真静音 → VAD 静音尾正常累计 →
+            # 句子正常定稿提交。而说话时短暂的弱音节起伏（< close_ms 就恢复）**不被切**。
+            self._peak *= self._release          # 静音块仍按 release 回落，增益恢复（下次快攻）
+            return np.zeros_like(x)
+
+        # 说话块（含短暂的弱音节起伏）：照常 AGC 放大——弱音节不被吞，避免半截话。
         p = float(np.max(np.abs(x))) + 1e-9
         self._peak = max(self._peak * self._release, p)   # 快攻（立即取新峰值）/慢放（按 release 回落）
         gain = self._target / self._peak
-        gain = min(max(gain, 1.0), self._max_gain)        # 只放大，上限 8x
+        gain = min(max(gain, 1.0), self._max_gain)        # 只放大，上限 max_gain
         return x * np.float32(gain)
 
 

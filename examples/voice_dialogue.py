@@ -322,9 +322,13 @@ def main():
                          "（告别语不入历史）。0=关闭自动休眠；唤醒关闭时本参数被忽略（永不"
                          "自动休眠）")
     ap.add_argument("--vad-threshold-db", type=float, default=-35.0,
-                    help="VAD 断句能量门槛 dB（默认 -35）：离麦克风远说话够不着门槛就不定稿"
-                         "提交（只有 partial 不出字）。调低（如 -42）提升灵敏度，但环境噪声"
-                         "更易误断句；配合 MicAGC 上限 8x 增益使用")
+                    help="VAD 断句能量门槛 dB（默认 -35）。MicAGC 已自动把远距离说话放大到"
+                         "门限以上并噪声门控（尾静音真静音，句子能定稿），一般无需改；旧补救"
+                         "（调低如 -42 提升灵敏度）会让环境噪声更易误断句，仅当房间很安静才用")
+    ap.add_argument("--mic-gain", type=float, default=24.0,
+                    help="MicAGC 最大增益倍率（默认 24x≈+27.6dB）：调大提升远距离/小声说话的"
+                         "灵敏度（噪声门控保证底噪不被放大、句子仍能定稿）；调小（如 8）回"
+                         "旧行为")
     ap.add_argument("--max-context-tokens", type=int, default=40000,
                     help="上下文 token 预算：超阈值触发历史压缩（默认 40000）")
     ap.add_argument("--max-history", type=int, default=0,
@@ -673,7 +677,7 @@ def main():
         con.status("休眠中，随时唤醒我哦~")          # 唤醒开：启动即休眠，只说唤醒词才对话
     else:
         tts.submit("你好，我在听。")                # 唤醒关（旧行为）：启动即对话
-    agc = MicAGC()
+    agc = MicAGC(max_gain=args.mic_gain)
 
     gate_on = [False]          # 回声门控状态（跨回调跟踪转换，mic 回调里检测）
     gate_since = [0.0]         # 门控开启时刻（monotonic）
