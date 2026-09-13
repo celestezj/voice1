@@ -297,8 +297,22 @@ class ClaudeAgentClient:
         self._closed = True
         if self._loop is not None and self._client is not None:
             try:
-                asyncio.run_coroutine_threadsafe(self._client.interrupt(),
-                                                 self._loop).result(timeout=3)
+                fut = asyncio.run_coroutine_threadsafe(self._client.interrupt(),
+                                                       self._loop)
+                try:
+                    fut.result(timeout=3)
+                except Exception:
+                    pass      # 超时/异常都吞——interrupt 尽力而为（ESC 语义）
+                if not fut.done():
+                    # interrupt 3s 没跑完（内部在等 CLI 控制响应）：孤儿 Task 若不 cancel，
+                    # 会 pending 到 loop.close() → "Task was destroyed but it is pending!" +
+                    # anyio fail_after 超时清理在关闭后执行 current_task() → "no running
+                    # event loop"（实测每次 Ctrl+C 退出都报，2026-09-13）。cancel 后以
+                    # CANCELLED 状态收场，close() 不再警告。
+                    try:
+                        self._loop.call_soon_threadsafe(self._cancel_orphan_tasks)
+                    except Exception:
+                        pass
             except Exception:
                 pass
         if self._loop is not None and self._pending is not None:
@@ -309,6 +323,20 @@ class ClaudeAgentClient:
                 pass
         if self._loop_thread is not None and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5)
+
+    def _cancel_orphan_tasks(self):
+        """loop 线程内：cancel 掉非 worker/inflight 的孤儿任务（如 close 时 3s 未完成的
+        interrupt）。被 cancel 的任务抛 CancelledError 展开栈，anyio 清理仍在 loop 线程内
+        执行（current_task() 有值）；任务以 CANCELLED 状态收场，loop.close() 不会报
+        'Task was destroyed but it is pending!'。绝不动 worker_task / inflight（它们还要
+        处理 close / 收尾旧回合）。"""
+        try:
+            for t in list(asyncio.all_tasks(self._loop)):
+                if (t is not self._worker_task and t is not self._inflight
+                        and t is not asyncio.current_task()):
+                    t.cancel()
+        except Exception:
+            pass
 
     # ---------------- 对外接口（线程安全，非阻塞） ----------------
     def set_callbacks(self, on_result=None, on_partial=None, on_error=None):
