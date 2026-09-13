@@ -28,6 +28,12 @@ UTF-8 + `ensure_ascii=False` + `\n` 结尾，服务端无响应。协议键 = �
 只入队（微秒级，**绝不做网络 IO**）；实际发送在常驻 daemon worker（FIFO 串行保序：
 先情绪后句子文本，句与句、reset 之间不乱序）。`emit` 每轮一次、`say` 逐句，FIFO
 即够，无需覆盖去重。
+
+连接策略（用户拍板）：**常驻长连接 + 惰性重连**——worker 持一条 socket 串行发送
+（`_lock` 保护，与 close 并发安全），发送前不检查状态，`sendall` 抛 `OSError` 即关旧
+重建重发一次；**不探测、无心跳**（live2d 可能重启回来，下次发送自动连上）。长连接让
+桌面端 `client_count` 恒为 1（"有 AI 在驱动"语义真正成立，见 desktop_pet 的
+`--look-at-cursor`）。
 """
 
 import json
@@ -48,6 +54,8 @@ class Live2dEmitter:
         self._enabled = False
         self._q = queue.Queue()          # FIFO 待发 payload（dict），worker 串行消费
         self._stop = threading.Event()
+        self._sock = None                # 常驻长连接（worker 持锁惰性建立/重建）
+        self._lock = threading.Lock()    # 保护 _sock：worker 与 close 并发安全
         if port is None:
             return                       # 未给端口 → 禁用，无 worker
         try:
@@ -96,29 +104,57 @@ class Live2dEmitter:
             self._send_sync(payload)
 
     def _send_sync(self, payload, log=True, raise_on_error=False):
-        """短连接发送一条 JSON；失败语义见类注释。
+        """长连接惰性发送一条 JSON（持 `_lock`，worker 与 close 串行）。
+
+        **惰性重连**（用户拍板）：发送前**不检查连接状态**——直接 `sendall`；抛 `OSError`
+        （断线/RST）则关旧连接、重建新连接、**重发一次**。不探测、无心跳（live2d 可能重启，
+        下次发送自动连上）。重发再失败按语义处理：
 
         - `raise_on_error=True`：失败上抛（构造测活用，__init__ 捕获后禁用并打印总提示）。
         - `log=False`：失败静默（close 收尾不刷提醒）。
-        - 其余（worker 运行中）：失败**打印提醒但不上抛、不置禁用**——live2d 中途退出后
-          可能重启回来，故继续如常发送（用户拍板），只提醒"live2d server 连接失败，请检查"。
+        - 其余（worker 运行中）：失败**打印提醒但不上抛、不置禁用**——只提醒
+          "live2d server 连接失败，请检查"。
         """
-        try:
-            data = (json.dumps(payload, ensure_ascii=False)
-                    .encode("utf-8") + b"\n")
-            with socket.create_connection((self._host, self._port), timeout=1) as s:
-                s.sendall(data)
-            return True
-        except OSError as e:
-            if raise_on_error:
-                raise
-            if log:
-                print("[live2d] live2d server 连接失败，请检查（%s:%d：%s）"
-                      % (self._host, self._port, e), flush=True)
-            return False
+        data = (json.dumps(payload, ensure_ascii=False)
+                .encode("utf-8") + b"\n")
+        with self._lock:
+            try:
+                self._ensure_sock()
+                self._sock.sendall(data)
+                return True
+            except OSError:
+                self._drop_sock()        # 连接已断 → 关旧
+            try:
+                self._ensure_sock()      # 重建
+                self._sock.sendall(data) # 重发一次
+                return True
+            except OSError as e:
+                self._drop_sock()
+                if raise_on_error:
+                    raise
+                if log:
+                    print("[live2d] live2d server 连接失败，请检查（%s:%d：%s）"
+                          % (self._host, self._port, e), flush=True)
+                return False
+
+    def _ensure_sock(self):
+        """惰性建立/复用常驻长连接（调用方持 `_lock`）。1s 超时：连接失败/发送阻塞
+        都不让 worker 卡死（协议无响应，发送缓冲理论上可满）。"""
+        if self._sock is None:
+            self._sock = socket.create_connection((self._host, self._port), timeout=1)
+            self._sock.settimeout(1)
+
+    def _drop_sock(self):
+        """关掉失效连接（调用方持 `_lock`）。断线重建 / close 收尾用。"""
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
 
     def close(self):
-        """程序退出：丢弃队列残留，同步补发一条恢复初始状态（失败静默）再停 worker。"""
+        """程序退出：丢弃队列残留，同步补发一条恢复初始状态（失败静默）再停 worker、关连接。"""
         if self._enabled:
             self._send_sync(_RESET, log=False)
             self._enabled = False
@@ -127,3 +163,5 @@ class Live2dEmitter:
             self._q.put_nowait(None)     # 唤醒 worker 退出
         except queue.Full:
             pass
+        with self._lock:
+            self._drop_sock()

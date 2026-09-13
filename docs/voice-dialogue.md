@@ -292,22 +292,29 @@ sequenceDiagram
 - **测活失败**：打印一条 `[live2d] 表情联动关闭…请确认已先启动 desktop_pet.py` 告知用户，
   **彻底禁用、不重试**——对话一切照常，只是不联动桌宠。
 - **运行中 live2d 中途退出**：**继续如常发送**，每次失败打印"live2d server 连接失败，请
-  检查"提醒——桌宠可能重启回来，不做自动停用。
+  检查"提醒——**惰性重连**：连接断了下次发送自动重建（桌宠可能重启回来，不做自动停用、
+  不做主动探测/心跳）。
 - **协议**：原始 TCP `127.0.0.1:PORT`，一行一个 JSON、UTF-8 + `ensure_ascii=False` + `\n`
-  结尾，无响应。voice1 的 16 心态名与 live2d `EMOTIONS` 键**完全一致**，恒等映射，无需
-  转换表。通道可合并在一条消息里，voice1 目前逐条发（emotion / say / reset 各自独立成行）。
+  结尾，无响应。**常驻长连接 + 惰性重连**（用户拍板）：worker 持一条 socket 串行发送，
+  发送前不检查状态，`sendall` 抛 `OSError` 即关旧重建重发一次——断线后第一条消息可能丢
+  （TCP 缓冲"假成功"），第二条必触发重建送达。长连接也让桌面端 `client_count` 恒为 1，
+  "有 AI 在驱动"的判定（desktop_pet `--look-at-cursor` 的"有事"）才真正成立。voice1 的
+  16 心态名与 live2d `EMOTIONS` 键**完全一致**，恒等映射，无需转换表。通道可合并在一条
+  消息里，voice1 目前逐条发（emotion / say / reset 各自独立成行）。
 - **只发 emotion/say 不碰 mouth**：说话期嘴的自动开合由 live2d 自己的 `--listen`（WASAPI
   回环对口型）负责——voice1 若发 `{"mouth":…}` 反会被桌宠音频能量线程覆盖，故不接管。
 - **实现**：`dialogue/live2d.py` 的 `Live2dEmitter`——构造**同步测活**（连上即补发一条
   组合复位，失败禁用）；`emit(mood)`/`say(text)`/`reset()` 触发点只在锁内入队（微秒级，
-  **不阻塞 LLM 线程**）；实际发送在常驻 daemon worker（FIFO 串行保序）。回休眠复位挂
-  `wake.go_sleep()` 的 `on_sleep` 回调（bye / 静默超时两条回休眠路径的**唯一汇聚点**，
-  见 `dialogue/wake.py`）；"停下"挂在 `asr.on_interrupt` 的组合回调（`ctrl.hard_stop()` +
-  `live2d.reset()`）。
+  **不阻塞 LLM 线程**）；实际发送在常驻 daemon worker（FIFO 串行保序），worker 持一条
+  **长连接** socket（`_lock` 保护，与 `close()` 并发安全），发送失败**惰性重建重发一次**。
+  回休眠复位挂 `wake.go_sleep()` 的 `on_sleep` 回调（bye / 静默超时两条回休眠路径的
+  **唯一汇聚点**，见 `dialogue/wake.py`）；"停下"挂在 `asr.on_interrupt` 的组合回调
+  （`ctrl.hard_stop()` + `live2d.reset()`）。
 - **headless 测试**：`tests/test_live2d.py`——假 TCP server 断言送达（emotion/say/reset
-  保序）、测活失败禁用、复位归位、bye/timeout 联动；`tests/test_say_tts.py`——假 TTS/Job
-  断言逐句链式不抢发、打断丢作废句、跨句停顿不复位（跑法
-  `PYTHONIOENCODING=utf-8 …/python.exe tests/test_live2d.py`，`test_say_tts.py` 同理）。
+  保序）、测活失败禁用、复位归位、bye/timeout 联动、**惰性重连**（断连接后下次发送自动
+  重建送达）；`tests/test_say_tts.py`——假 TTS/Job 断言逐句链式不抢发、打断丢作废句、跨句
+  停顿不复位（跑法 `PYTHONIOENCODING=utf-8 …/python.exe tests/test_live2d.py`，
+  `test_say_tts.py` 同理）。
 
 ## 文本输入源（键盘/脚本输入，调试用，默认关）
 

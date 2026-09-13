@@ -250,7 +250,9 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   **一条组合消息**（表情回平和 + 收框），触发点：初始化测活 / 拜拜 / "停下"打断 / 静默超时
   回休眠 / Ctrl+C 退出（无条件），以及**一轮播放真正播完**（`--live2d-idle-reset` 默认开，
   `--no-…` 关；判定用 controller 新增 `turn_active`=LLM 流在途或 TTS 队列非空，防句中停顿
-  误收框）。协议 = 原始 TCP 127.0.0.1:PORT 一行 JSON、UTF-8+\n、无响应；16 心态与 live2d
+  误收框）。协议 = 原始 TCP 127.0.0.1:PORT 一行 JSON、UTF-8+\n、无响应；**常驻长连接 +
+  惰性重连**（worker 持一条 socket，发送失败关旧重建重发一次，不探测/无心跳——live2d 重启
+  下次发送自动连上；断线后首条可能丢、次条重建送达）；16 心态与 live2d
   EMOTIONS 键**恒等映射**；只发 emotion/say 不碰 mouth（嘴由 live2d `--listen` 对口型负责）。
   实现 `dialogue/live2d.py` `Live2dEmitter`——`emit()`/`say()`/`reset()` 只在锁内入队
   （微秒级**不阻塞 LLM 线程**），daemon worker FIFO 串行发送；回休眠复位挂 `wake.go_sleep()`

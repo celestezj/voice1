@@ -31,12 +31,14 @@ RESET = {"emotion": None, "say": None}   # 恢复初始状态消息（测试期�
 
 
 class FakeServer:
-    """假 live2d control server：TCP 逐行收 JSON，记进 received（Live2dEmitter 每
-    次短连接，服务端按连接收完整条后关闭）。"""
+    """假 live2d control server：TCP 逐行收 JSON，记进 received（Live2dEmitter
+    常驻**长连接**，所有消息走同一条连接；`kill_conns()` 模拟桌面端重启/断开）。"""
 
     def __init__(self):
         self.received = []                       # 收行原始 JSON 字符串（保序）
         self._stop = False
+        self._conns = []                         # 当前活动连接（kill_conns 用）
+        self._conns_lock = threading.Lock()
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._srv.bind(("127.0.0.1", 0))
@@ -53,20 +55,42 @@ class FakeServer:
                 continue
             except OSError:
                 break
-            with conn:
-                buf = b""
-                while True:
-                    try:
-                        data = conn.recv(4096)
-                    except OSError:
-                        break
-                    if not data:
-                        break
-                    buf += data
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        if line:
-                            self.received.append(line.decode("utf-8"))
+            with self._conns_lock:
+                self._conns.append(conn)
+            threading.Thread(target=self._read_conn, args=(conn,), daemon=True).start()
+
+    def _read_conn(self, conn):
+        buf = b""
+        with conn:
+            while True:
+                try:
+                    data = conn.recv(4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                buf += data
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if line:
+                        self.received.append(line.decode("utf-8"))
+        with self._conns_lock:
+            if conn in self._conns:
+                self._conns.remove(conn)
+
+    def kill_conns(self):
+        """关闭全部活动连接（模拟桌面端退出/重启），server 仍可 accept 新连接。"""
+        with self._conns_lock:
+            conns = list(self._conns)
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)     # 让对端尽快收到 RST/FIN
+            except OSError:
+                pass
+            try:
+                c.close()
+            except OSError:
+                pass
 
     def last(self):
         """最新一条已解析 dict（未收到 → None）。"""
@@ -74,6 +98,7 @@ class FakeServer:
 
     def close(self):
         self._stop = True
+        self.kill_conns()
         try:
             self._srv.close()
         except OSError:
@@ -169,6 +194,27 @@ emitter.close()
 time.sleep(0.1)
 assert srv2.last() == RESET, "close 应补发复位, 实际 %r" % srv2.last()
 print("测试10 close 归位 OK: 退出前补发 {emotion:null,say:null}")
+
+# ---- 11. 惰性重连：server 断开后，下次发送自动重建连接并送达 ----
+srv3 = FakeServer()
+em3 = Live2dEmitter(port=srv3.port)
+time.sleep(0.1)
+assert srv3.last() == RESET               # 初始归位（长连接）
+n_before = len(srv3.received)
+srv3.kill_conns()                          # 模拟 desktop_pet 退出/重启：断全部连接
+time.sleep(0.05)
+em3.emit("开心")                           # 第一次：可能假成功进缓冲（惰性重连固有窗口）
+time.sleep(0.25)
+em3.emit("难过")                           # 第二次：必撞 RST → 关旧 → 重建 → 重发送达
+time.sleep(0.3)
+assert srv3.last() == {"emotion": "难过"}, \
+    "断开后应自动重建连接送达, 实际 %r" % srv3.last()
+assert len(srv3.received) >= n_before + 1, \
+    "重建后应经新连接收到后续消息, received=%r" % srv3.received
+print("测试11 惰性重连 OK: server 断开后自动重建并送达 %r（共收 %d 条）"
+      % (srv3.last(), len(srv3.received)))
+em3.close()
+srv3.close()
 
 srv.close()
 srv2.close()
