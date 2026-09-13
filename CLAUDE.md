@@ -132,6 +132,10 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   PowerShell 导致走 Bash 的会话报"脚本被拦住了"（天气查不到根因）**，故双 shell 都放行）；
   **MCP 工具自动放行**：启用 MCP 时按 `.mcp.json` 实际 server 名自动补 `mcp__<name>__*`
   白名单（只放行配置的 server，新增 MCP 无需改码）；`--no-mcp` 可整体不挂 MCP）；
+  带独立 venv 的 MCP（如 search `free-search-mcp`）：`command` 写相对 assistant 目录的
+  venv python（如 `.venv-search/Scripts/python.exe`）+ `args: ["-m", "search_mcp"]`——
+  裸 `python` 会被替换成 voice-asr，独立 venv 的包找不到（实测 search MCP 挂载失败根因）；
+  `-m` 后的参数是模块名不转绝对路径（`agent.py` 已支持）；
   `--agent-resume` 续上次会话
   （session_id 落盘 `sessions/agent_session_id.txt`）。默认 `--brain llm` 时现有 LLM 集成
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自

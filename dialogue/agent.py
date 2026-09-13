@@ -210,11 +210,32 @@ class ClaudeAgentClient:
             cmd = (cfg.get("command") or "").strip().lower()
             if cmd in ("python", "python3", "pythonw", "py"):
                 cfg["command"] = sys.executable
+            else:
+                # 非 python 命令：相对路径视为相对 agent 目录（与 args 同），写成绝对路径，
+                # 跟启动目录解耦——如 `python -m search_mcp` 的 search MCP 是独立 venv
+                # （.venv-search）里的 python，不能换成本 agent 的 python，command 须写
+                # `.venv-search/Scripts/python.exe` 这种相对路径再转绝对。
+                c = cfg.get("command") or ""
+                if c and not os.path.isabs(c):
+                    cfg["command"] = os.path.abspath(os.path.join(self._cwd, c))
             # 相对 args 视为相对 agent 目录（.mcp.json 所在处），写成绝对路径，跟启动目录解耦
             # （防从别处 `python voice_dialogue.py` 时 MCP 子进程找不到脚本）。
+            # `-m <模块名>` 形态：`-m` 之后的参数是模块名（如 `-m search_mcp`），不是文件路径，
+            # 保持原样——否则会被误当成相对路径转绝对（实测 search MCP 挂载失败根因）。
             args = cfg.get("args") or []
-            cfg["args"] = [os.path.abspath(os.path.join(self._cwd, a)) if a and not os.path.isabs(a)
-                           and not a.startswith("-") else a for a in args]
+            out = []
+            module_next = False
+            for a in args:
+                if module_next:
+                    module_next = False
+                    out.append(a)
+                elif a == "-m":
+                    module_next = True
+                    out.append(a)
+                else:
+                    out.append(os.path.abspath(os.path.join(self._cwd, a))
+                               if a and not os.path.isabs(a) and not a.startswith("-") else a)
+            cfg["args"] = out
             selected[name] = cfg
         if self._debug:
             print("[agent] MCP servers: %s" % (", ".join(selected) or "（无）"), flush=True)
