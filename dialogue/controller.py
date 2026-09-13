@@ -29,6 +29,16 @@ class DialogueController:
     _SOFT_CUT = " 　，、："    # 兜底硬切的可落点：空格分句缝 + 逗号类（非句末边界）
     _HARD_MAX = 40                # 无标点累积超此长度 → 兜底硬切（保首包延迟）
     _SOFT_WINDOW = 20             # 硬切时在末 _SOFT_WINDOW 字符里回找软分句缝（绝不撕词）
+    # 引号（中文/ASCII）：送 TTS 前剥掉——语音不念引号，`。”`/`？"`/`。" "` 这类"句末标点+
+    # 引号"连在一起会让 TTS 前端对全角引号处理不稳、合成怪尾音（实测苏联笑话 2026-09-13）。
+    _QUOTE_RE = re.compile(r"[“”‘’\"']")
+    # 括号类（书名号/方括号/圆括号等）：语音不念，`？》】`/`《…` 这类"标点+括号"连标点同样
+    # 出怪声（实测笑话标题《世界上哪个国家最大？》末尾 `？》】` 2026-09-13）。须在 _MOOD_SUB
+    # 之后剥（先剥【心态：xxx】整体，否则心态文字会从括号里漏出来被念）。
+    _BRACKET_RE = re.compile(r"[《》〈〉「」『』【】（）〔〕]")
+    # 右引号/右括号/闭书名号：句末边界（？！。…\n）之后紧随的闭符并入前一句——否则
+    # 换行切句会把 `"》》` 这类纯标点残留切成独立 Job，TTS 合成标点怪声（实测苏联笑话标题）。
+    _CLOSERS = frozenset("”’\"'》」』】）〕〉")
 
     # 心态标记：LLM 回复开头带【心态：xxx】（user_prompt.txt 约定），代表表情、不念出来。
     # 支持【】与 [] 两种括号；_MOOD_RE 取首个心态（on_mood 回调），_MOOD_SUB 只在送 TTS 时
@@ -198,11 +208,19 @@ class DialogueController:
     # ---------------- TTS 提交 + 忙碌跟踪（voice0 Job.done，不改 voice0）----------------
     def _submit_tts(self, sentence):
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
+        if not any(ch.isalnum() for ch in sentence):
+            return      # 纯标点/空白段（换行残留的 `"》》`、`"` 等）不送 TTS——避免合成标点怪声
+        sentence = self._QUOTE_RE.sub("", sentence)    # 剥引号：`。”`→`。`、`？"`→`？`（TTS 不念引号）
+        if not any(ch.isalnum() for ch in sentence):
+            return      # 剥引号后若只剩标点（如独立 `。”`）也不送
         sentence = self._ASK_RE.sub("", sentence)      # 【询问】标记剥掉不念（正文/存档保留）
         if self._mood_marker:                          # 心态标记【心态：xxx】只在送 TTS 时剥掉不读
             sentence = self._MOOD_SUB.sub("", sentence)
             if not sentence:
                 return                                # 纯标记残句剥完为空 → 无需播
+        sentence = self._BRACKET_RE.sub("", sentence)  # 剥括号：`？》】`→`？`、`《…`→`…`（TTS 不念括号）
+        if not any(ch.isalnum() for ch in sentence):
+            return      # 剥括号后若只剩标点（如独立 `》】`）也不送
         job = self._tts.submit(sentence)
         with self._lock:
             if self._turn_first_submit_ts is None:
@@ -456,7 +474,7 @@ class DialogueController:
                     self._mood = "平和"            # LLM 没带标记 → 默认心态
                 self._commit_locked(full)
                 self._stream_thread = None
-            if self._on_ai_sentence and tail:
+            if self._on_ai_sentence and tail and any(ch.isalnum() for ch in tail):
                 self._on_ai_sentence(tail)
             if self._on_ai_done and full.strip():
                 self._on_ai_done(full)
@@ -530,7 +548,7 @@ class DialogueController:
             if self._on_llm_error:
                 self._on_llm_error(err)            # 控制台 "× LLM 出错"（agent 也叫这行）
             return
-        if self._on_ai_sentence and tail:
+        if self._on_ai_sentence and tail and any(ch.isalnum() for ch in tail):
             self._on_ai_sentence(tail)
         if self._on_ai_done and full.strip():
             self._on_ai_done(full)
@@ -583,8 +601,8 @@ class DialogueController:
                 sentence = self._assistant_buf[:cut].strip()
                 self._assistant_buf = self._assistant_buf[cut:]
                 first = self._tts_job is None     # 本回合首句（尚无 TTS 任务在册）
-            if not sentence:
-                continue                          # 纯边界字符（如"。。"）丢弃后继续找
+            if not any(ch.isalnum() for ch in sentence):
+                continue                          # 纯标点段（如"。。"/换行残留闭引号）丢弃后继续找
             if first and self._reply_hold > 0:
                 time.sleep(self._reply_hold)      # 锁外：给用户续句打断的机会
                 with self._lock:
@@ -593,6 +611,15 @@ class DialogueController:
             self._submit_tts(sentence)
             if self._on_ai_sentence:
                 self._on_ai_sentence(sentence)
+
+    def _absorb_closers(self, buf, i):
+        """切点后紧随的闭引号/闭括号并入前一句（可跨换行：corpus 原文 `？\n"》》`
+        分行时 `"》》` 的闭符归前句，不残留纯标点独立段——否则换行切句把它切成
+        独立 Job，TTS 合成标点怪声）。"""
+        n = len(buf)
+        while i < n and (buf[i] in self._CLOSERS or buf[i] in self._BOUNDARY):
+            i += 1
+        return i
 
     def _find_cut(self, buf):
         """返回首个可提交切点下标；无可提交（无边界且未超长）返回 None。"""
@@ -615,7 +642,7 @@ class DialogueController:
             if i >= 0 and (first < 0 or i < first):
                 first = i
         if first >= 0 and len(buf[:first + 1].strip()) >= 2:
-            return first + 1
+            return self._absorb_closers(buf, first + 1)
         # 1b) 无合格首边界 → 退回取最后一个边界（旧行为，防句中停顿被拆）
         last = -1
         for ch in self._BOUNDARY:
@@ -623,7 +650,7 @@ class DialogueController:
             if i > last:
                 last = i
         if last >= 0 and len(buf[:last + 1].strip()) >= 2:
-            return last + 1
+            return self._absorb_closers(buf, last + 1)
         # 2) 超长无标点 → 兜底硬切（保首包延迟）。绝不撕词：先回找末 _SOFT_WINDOW
         #    字符里的软分句缝（空格/逗号类——LLM 按空格分短句，切在缝上停顿自然）；
         #    找不到才硬切 _HARD_MAX。硬切落在词中间会把词撕开（"钟|表"、"黑眼|圈"），
