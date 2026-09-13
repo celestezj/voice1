@@ -48,6 +48,7 @@ class WakeSession:
         self.inactive_timeout = inactive_timeout
         self._farewell = None                            # 待播告别语（静默超时路径暂存）
         self.on_sleep = on_sleep                         # 可选：进入休眠回调(reason)，调用方注入
+        self.woke_at = None                              # 最近唤醒时刻（monotonic；吞唤醒词残句防御用）
 
     @property
     def sleeping(self):
@@ -59,8 +60,20 @@ class WakeSession:
         if self.state == ACTIVE:
             return None
         self.state = ACTIVE
+        self.woke_at = time.monotonic()
         self.last_activity = time.monotonic()
         return READY_PHRASE
+
+    def just_woke(self, within=3.0):
+        """刚唤醒（within 秒内）→ True。用于吞掉唤醒词 ASR 定稿残句（防御）：
+
+        唤醒走 ASR partial 命中时，`asr.interrupt()` 已把唤醒词残句作废（stale 不进
+        回调）；本方法作第二道防线——万一有竞态漏网的唤醒词定稿句，on_sentence 据此
+        吞掉（不入 LLM/历史），避免"小爱小爱"被当成对话内容提交一轮。
+        """
+        if self.woke_at is None:
+            return False
+        return (time.monotonic() - self.woke_at) <= within
 
     def go_sleep(self, reason="timeout"):
         """对话 → 休眠；返回要播的告别语（调用方 tts.submit 后 set_self_talk）。

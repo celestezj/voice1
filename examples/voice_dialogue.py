@@ -534,8 +534,37 @@ def main():
         except Exception as e:
             print("[自播] 语音播放失败：%s" % e, flush=True)
 
+    def _do_wake():
+        """KWS 命中 / ASR partial 命中唤醒词 → 统一唤醒（幂等）。
+
+        唤醒瞬间 `asr.interrupt()` 清场：作废唤醒词残句（stale 不进 on_sentence、
+        不入 LLM/历史），并清唤醒 KWS 流状态。interrupt 的 on_interrupt 副作用
+        （hard_stop 空操作 + live2d reset）在唤醒语义下均无害/合理。
+        """
+        phrase = wake.on_wake()                # 首次 → READY_PHRASE；已唤醒 → None（幂等）
+        if phrase is None:
+            return
+        try:
+            asr.interrupt()                    # 清场：唤醒词残句作废，不进对话
+        except Exception:
+            pass
+        if wake_det is not None:
+            try:
+                wake_det.reset()               # 清唤醒 KWS 流状态，防旧词残留
+            except Exception:
+                pass
+        _say(phrase)
+        con.status("[唤醒] 已唤醒，开始对话")
+
     def on_partial(p):
         wake.note_partial()                        # 有语音出字 → 用户在说话（任意距离都算）
+        # 远场唤醒兜底：睡眠态也喂 ASR（on_sentence 防御返回，不提交）；ASR 流式识别到
+        # 唤醒词 → 唤醒。KWS(3.3M) 灵敏度比 paraformer-large 低 ~10dB（实测 SNR+5dB 就
+        # 漏），40cm 远距说话 KWS 不醒、ASR 能识别——靠这一路补上。
+        if wake.sleeping and wake_words \
+                and any(w in p.text for w in wake_words):
+            _do_wake()
+            return
         if p.text and p.text != asr_last[0]:
             asr_last[0] = p.text
             # "… "前缀 = 仍在出字、未定稿（不会提交）；定稿后 on_user 的时间戳覆盖它
@@ -608,7 +637,19 @@ def main():
 
     def on_sentence(r):
         # 定稿句统一入口：休眠期防御返回；退出词拦截（不入历史/LLM）；其余正常提交。
-        if wake.sleeping:                  # 休眠期不应有定稿句（没喂 ASR）——防御
+        if wake.sleeping:
+            # 睡眠态定稿句：检测唤醒词 → 唤醒。**唤醒以定稿句为准**——paraformer 流式
+            # partial 在真实时序/边缘 SNR 下把"小爱小爱"识别歪（实测"答爱小"/"小爱小"），
+            # flush 定稿才出完整句（实测 40cm SNR+5dB 定稿"小爱小爱"）。40cm 远距 KWS
+            # 漏检，靠这路兜底。唤醒词残句不入 LLM/历史（下面防御返回）。
+            if wake_words and any(w in r.text for w in wake_words):
+                _do_wake()
+            return
+        # 唤醒词残句防御：刚唤醒（within 3s）定稿的句子含唤醒词 → 吞掉（不入 LLM/历史）。
+        # 正常路径唤醒瞬间 _do_wake 已 asr.interrupt() 作废残句（stale 不进回调），
+        # 这层只兜未知竞态，防"小爱小爱"被当对话内容提交一轮。
+        if wake.just_woke() and wake_words \
+                and any(w in r.text for w in wake_words):
             return
         if exit_words and any(w in r.text for w in exit_words):
             on_user(r)                     # 退出词照常显示（识别事实），但不进历史/LLM
@@ -694,15 +735,28 @@ def main():
         rms2 = float(np.mean(mono * mono)) + 1e-12
         now = time.monotonic()
 
-        # ---- 休眠：只听唤醒词，其余一律不喂 ASR（说什么都不识别）----
+        # ---- 休眠：只听唤醒词，其余不提交。KWS 近场低延迟快速唤醒 + ASR 远场兜底 ----
         if wake.sleeping:
+            if wake.self_talk is not None and not wake.self_talk.done:
+                # 告别语在播（自播回声）：只喂 KWS，不喂 ASR——自播语音不进识别（否则
+                # "我先退下啦"被当句子提交/唤醒词误检）。播完（done）自然放行。
+                if wake_det is not None:
+                    try:
+                        wake_det.feed(mono)
+                    except Exception:
+                        pass
+                return
             if wake_det is not None:
                 try:
                     if wake_det.feed(mono):
-                        _say(wake.on_wake())       # 就绪语直连 TTS（不入历史/LLM）
-                        con.status("[唤醒] 已唤醒，开始对话")
+                        _do_wake()               # 近场 KWS 命中（低延迟快速唤醒）
                 except Exception:
                     pass                          # 检测器异常不致命，跳过本块
+            # 远场唤醒兜底：睡眠态也喂 ASR 流式——KWS(3.3M) 灵敏度比 paraformer 低 ~10dB，
+            # 40cm 远距 KWS 漏检、ASR 能识别（on_partial 检测唤醒词 → _do_wake）。
+            # 唤醒瞬间 interrupt() 作废唤醒词残句；休眠期定稿句 on_sentence 防御返回。
+            if wake.sleeping:
+                asr.ingest(mono, source_ts=now)
             return
 
         # ---- 对话中 ----

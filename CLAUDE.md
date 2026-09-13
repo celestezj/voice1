@@ -158,16 +158,22 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `on_interrupt` 回调 → 控制器 `hard_stop()`：立即终止 LLM 流与 TTS 输出；**被打断的问题
   保留进历史**，"停下"本身经 KWS 旁路吞掉、绝不进历史/LLM 输入。
 - **休眠/唤醒/退出状态机**（`--wake-word` 默认"小爱小爱"，逗号多词）：启动默认休眠——
-  mic 只喂唤醒词 KWS（`dialogue/wake.py` `WakeSession` 两态），其余一律不喂 ASR（说什么
-  都不识别/不提交）。命中唤醒词 → 对话 + 播就绪语"在的，我在听"。退出词（`--exit-words`
-  默认"拜拜"）在 `on_sentence` 入口拦截（照常显示但不进历史/LLM）；静默超时
-  `--inactive-timeout`（默认 60s）无用户语音 → 回休眠。**就绪/告别语走直连 `tts.submit`
-  （不经 controller → 不入历史），其 Job 作"自播回声"门控**——自播期只喂"停下"，否则
-  "在的，我在听"会被识别成用户的话再提交一轮。唤醒 KWS 跑在 MicAGC 后（上限 24x + 噪声
-  门控），远距离也能命中、底噪不误触发；`--wake-word ""` 关闭状态机（启动即对话旧行为），
-  且**无唤醒检测器 → 永不自动休眠**（休眠后无唤醒途径=死机）。静默超时告别语经 `wake.consume_farewell()` 由调用方播
+  **双路唤醒**（`dialogue/wake.py` `WakeSession` 两态）：① 唤醒词 KWS（sherpa 3.3M）
+  逐块 `feed()` 近场低延迟命中；② **睡眠态也喂 ASR 流式**，`on_sentence` 定稿句含唤醒词
+  → 唤醒（`_do_wake`：`asr.interrupt()` 作废唤醒词残句 + KWS reset + 播就绪语）。根因
+  （2026-09-12 实测）：KWS 灵敏度比 paraformer-large 低 ~10dB，40cm（SNR+5dB 分水岭）
+  KWS 漏、ASR 定稿仍识别"小爱小爱"——故**唤醒以定稿句为准**（流式 partial 边缘下识别歪
+  "答爱小"，flush 定稿才完整）。就绪/告别语走直连 `tts.submit`（不入历史），其 Job 作
+  "自播回声"门控——自播期只喂"停下"（告别语播放期只喂 KWS，自播语音不进识别）。退出词
+  （`--exit-words` 默认"拜拜"）在 `on_sentence` 入口拦截（照常显示但不进历史/LLM）；静默
+  超时 `--inactive-timeout`（默认 60s）无用户语音 → 回休眠。`--wake-word ""` 关闭状态机
+  （启动即对话旧行为），且**无唤醒检测器 → 永不自动休眠**（休眠后无唤醒途径=死机）。静默
+  超时告别语经 `wake.consume_farewell()` 由调用方播
   （feed_decision 内部 go_sleep 的返回传不回调用方）。历史跨休眠保留（同次运行不清空，重启
-  才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。详见
+  才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。**打断词与唤醒词同款 KWS
+  （3.3M）、40cm 同漏检风险，但打断词仍单路（只有块级 KWS 旁路，无 ASR 定稿兜底）**——
+  漏检后果比唤醒更糟（"停下"被当普通句子提交 LLM）。完整对比见
+  `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」的对比表格。详见
   `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」。
 - **回声半双工门控（v1）**：TTS 播放期（`ctrl.tts_busy`）mic 只喂 `asr.ingest_kws_only()`
   （只听"停下"，回声不进识别 → 无反馈自答）；`--no-echo-gate` 关（耳机近场可用）。

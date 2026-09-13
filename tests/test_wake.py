@@ -153,4 +153,22 @@ w2 = WakeSession(wake_enabled=False, inactive_timeout=60)
 assert w2.consume_farewell() is None, "从未休眠→无待播告别语→None"
 print("测试9 超时告别语 OK: 超时回休眠后告别语可取走播放，无待播幂等 None")
 
+# ---- 10. just_woke：刚唤醒吞唤醒词残句的防御窗口 ----
+w = WakeSession(wake_enabled=True, inactive_timeout=60)
+assert not w.just_woke(), "从未唤醒 → False"
+assert w.on_wake() == READY_PHRASE
+assert w.just_woke(within=5.0), "刚唤醒 → within 内 True"
+assert w.just_woke(within=0.0), "刚唤醒 → 任意窗口（此刻仍在窗口内）"
+time.sleep(0.02)
+assert not w.just_woke(within=0.005), "超过窗口 → False"
+assert w.just_woke(within=10.0), "大窗口仍 True（唤醒时间戳已设）"
+# 幂等重复 on_wake 不刷新 woke_at（防"第二次唤醒"重置防御窗口造成漏吞）
+w2 = WakeSession(wake_enabled=True, inactive_timeout=60)
+w2.on_wake()
+t_woke = w2.woke_at
+time.sleep(0.02)
+assert w2.on_wake() is None, "重复 on_wake 幂等"
+assert w2.woke_at == t_woke, "重复 on_wake 不应刷新 woke_at（防御窗口不被重置）"
+print("测试10 just_woke OK: 唤醒设窗口、超窗过期、重复唤醒不重置")
+
 print("\n全部通过 ✔")
