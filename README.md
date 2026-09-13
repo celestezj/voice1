@@ -36,6 +36,8 @@ python bench/bench_asr.py --backend paraformer --device cuda --tag my     # 验�
   默认 llm+melo，`vits`=换多音色，`agent`=本地 claude 大脑，任意组合+透传见
   [`docs/voice-dialogue.md`](docs/voice-dialogue.md)「一键启动脚本」。
 - 语音对话：快速开始 + 参数白话解释 + 架构时序图：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。
+- 文本输入源（调试，默认关）：`--text-input-port` + `examples/text_input.py`，与麦克风并存——见
+  docs/voice-dialogue.md「文本输入源」。
 - LLM 引擎扩展（DeepSeek/llmx 之外换引擎怎么做）：见 [`docs/EXTENDING-BACKENDS.md`](docs/EXTENDING-BACKENDS.md)。
 
 ## 引擎设计（RealtimeASR）

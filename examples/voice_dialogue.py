@@ -94,7 +94,9 @@ from dialogue.mic import MicAGC, check_mic_signal, pick_input_device  # noqa: E4
 from dialogue.wake import WakeSession, ACTIVE          # noqa: E402  休眠/对话状态机
 from dialogue.live2d import Live2dEmitter              # noqa: E402  心态→表情 + 全 TTS 文本→说话框（--live2d-port）
 from dialogue.say_tts import SayTTS                    # noqa: E402  tts 代理：说话框逐句链式跟播（不抢发）
+from dialogue.text_input import TextInputServer, route_text_line, INTERRUPT  # noqa: E402 文本输入源（--text-input-port）
 from asr.core.audio import resample_to   # noqa: E402
+from asr.core.jobs import SentenceResult  # noqa: E402  文本输入合成定稿句（会话同轴时间戳）
 
 
 SR = 16000
@@ -394,6 +396,9 @@ def main():
                     help="一轮对话播放结束后自动复位 live2d（收说话框 + 表情回平和）（默认开）："
                          "这轮回复播完、气泡不再需要时把桌宠恢复初始状态；--no-live2d-idle-reset "
                          "关闭后气泡/表情保持到下一轮或拜拜/超时/停下才清")
+    ap.add_argument("--text-input-port", type=int, default=None,
+                    help="文本输入端口（默认关=原程序零变化）：起本地 TCP 监听，"
+                         "examples/text_input.py 连入逐行输入，与麦克风语音并存（调试输入源）")
     args = ap.parse_args()
 
     # ---- vits 音色清单（--tts-list-voices）：打印后退出，不初始化引擎 ----
@@ -659,6 +664,21 @@ def main():
             return
         ctrl.feed_asr_sentence(r)
 
+    # ---- 文本输入源（--text-input-port）：与麦克风并存的键盘/脚本输入，默认关=零变化 ----
+    _tx_idx = [0]
+    def make_result(line):
+        """文本无音频：audio_* 取当下会话轴时刻（on_user 只读 audio_* 打时间戳）。"""
+        _tx_idx[0] += 1
+        now, t0 = time.monotonic(), asr.session_t0
+        a = now - t0
+        return SentenceResult(_tx_idx[0], line, a, a, a, a)
+
+    def feed_text(line):
+        """TCP 文本行 → 路由：休眠自动唤醒（不播就绪语）/ 打断词整行 hard_stop / 普通句送对话。"""
+        action = route_text_line(ctrl, wake, interrupt_words, line, make_result)
+        if action == INTERRUPT:
+            con.status("〔文本〕打断")    # 诊断可见（语音 KWS 打断不打印，二者不冲突）
+
     asr.on_sentence(on_sentence)
     def _on_interrupt():
         # 用户说"停下"→ 立即终止 LLM+TTS；live2d 同步收说话框 + 表情复位（用户拍板）
@@ -803,6 +823,18 @@ def main():
         else:
             asr.ingest(mono, source_ts=now)
 
+    # ---- 文本输入源（--text-input-port）：起常驻 TCP 监听，examples/text_input.py 连入 ----
+    text_srv = None
+    if args.text_input_port:
+        try:
+            text_srv = TextInputServer("127.0.0.1", args.text_input_port, feed_text)
+            text_srv.start()
+            print("[文本输入] 端口 %d 已开（examples/text_input.py 连入逐行输入，与麦克风并存）"
+                  % args.text_input_port, flush=True)
+        except OSError as e:
+            print("[文本输入] 端口 %d 被占用，已禁用：%s" % (args.text_input_port, e), flush=True)
+            text_srv = None
+
     try:
         with sd.InputStream(samplerate=dev_sr, channels=1, device=input_idx, callback=cb):
             while True:
@@ -827,6 +859,8 @@ def main():
         if wake_det is not None:
             wake_det.close()
         asr.close()
+        if text_srv is not None:
+            text_srv.close()             # 停文本输入监听（不再收新行）
         ctrl.close()
         if live2d is not None:
             live2d.close()                        # 恢复初始状态（收框+表情平和）+ 停发送 worker

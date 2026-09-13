@@ -298,8 +298,12 @@ class DialogueController:
             self._prompt_tokens = None     # 压缩后失效，等下次响应重定
 
     # ---------------- 入口：ASR on_sentence（ASR worker 线程）----------------
-    def feed_asr_sentence(self, result):
+    def feed_asr_sentence(self, result, *, barge_audio=False):
         """新定稿句。快操作，不阻塞识别。
+
+        barge_audio=True：**文本输入源用**——只要 TTS 还在播（哪怕 LLM 已吐完、仅音频在播）
+        也立即 interrupt 切掉作废音频。语音定稿句默认 False：LLM 已答完、仅音频在播时**不**
+        打断（让回答播完、新回复排队）——语音/文本打断语义不同，用户拍板。
 
         三层防拆句：
         - 在途 barge：LLM 还在流时来新句 → gen+1 弃流 + `tts.interrupt()`，累计重发。
@@ -327,8 +331,8 @@ class DialogueController:
             self._assistant_buf = ""          # 旧流作废：清缓冲与完整文本
             self._assistant_full = ""
             self._assistant_display = ""
-            if in_flight or post_commit:
-                self._tts.interrupt()         # 在途吐词 / 已答未开播 → 切掉作废音频
+            if in_flight or post_commit or (barge_audio and self._tts_busy):
+                self._tts.interrupt()         # 在途吐词 / 已答未开播 / 文本强打断 → 切掉作废音频
             self._stream_thread = None        # 在途流作废（gen 已变，旧线程自行退出）
             if self._merge_window > 0:
                 self._merge_deadline = time.monotonic() + self._merge_window

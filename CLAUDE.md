@@ -116,6 +116,20 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   merge-window 的直觉 + 时间线 + 校准 + mermaid 线程时序）：见
   [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些参数很难懂，解释时先讲
   直觉（"你停多久算说完""AI 答完但音频没播的空档""回声防护"），别只念数值。
+- **文本输入源（调试，可选）** `--text-input-port <端口>`（默认关=原程序零变化）：起本地
+  TCP 监听，`examples/text_input.py` 连入后 `while input()` 逐行输入，**与麦克风语音并存**
+  ——不方便对麦克风说话时用它调试对话。**输出侧零改动**（控制台/音频/live2d 全走原逻辑）。
+  **文本模式语义**（用户拍板）：唤醒词/退出词**无效**（当普通句子送 LLM/agent，不触发状态
+  机）；打断词（默认"停下"）**整行完全等于**→ 立即 `hard_stop` 停当前输出（不进历史/LLM，
+  无输出在途=no-op）；休眠态输入问题**自动唤醒直接对话**（不播就绪语）；发一句可立即敲下一
+  句（非阻塞），正在输出时敲下句立即打断重发（同语音 barge-in）。**打断语义比语音更强**
+  （`feed_asr_sentence(..., barge_audio=True)`）：**只要 TTS 还在播就立即切掉**——哪怕 LLM
+  已答完、仅剩音频在播也打断（用户实测"播放时输入下一问旧音频还在播"定位的差别）；语音定稿句
+  默认 barge_audio=False **不**打断已答完音频（让回答播完、新回复排队）。注入点复用
+  `ctrl.feed_asr_sentence(SentenceResult(...), barge_audio=True)`——与麦克风定稿句同构，
+  barge-in/post-commit/历史/存档/live2d 全自动继承。实现 `dialogue/text_input.py`
+  （TextInputServer + route_text_line，可 headless 测），客户端 `examples/text_input.py`，
+  测试 `tmp/test_text_input.py`。详见 docs/voice-dialogue.md「文本输入源」。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > `--llm-config` 指定文件 > 默认
   `config.local.json` > 环境变量 `DEEPSEEK_API_KEY`（`--llm-config` 可换整份配置）。
@@ -271,7 +285,9 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
                  mic.py（MicAGC 自适应增益+噪声门控/check_mic_signal/pick_input_device）/
                  wake.py（WakeSession：休眠/对话两态状态机，唤醒/退出/静默超时，纯逻辑可测）/
                  live2d.py（Live2dEmitter：心态→表情 + 全 TTS 文本→说话框，启动测活+组合复位）/
-                 say_tts.py（SayTTS：tts 代理，文本→说话框逐句链式跟播+一轮播完复位，纯逻辑可测）
+                 say_tts.py（SayTTS：tts 代理，文本→说话框逐句链式跟播+一轮播完复位，纯逻辑可测）/
+                 text_input.py（TextInputServer：--text-input-port 文本输入源 TCP server +
+                   route_text_line 纯路由：休眠自动唤醒/打断词整行/唤醒词·退出词无效，可测）/
                  config.local.json（机密 API key，gitignored，绝不提交）
 assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力；
                  独立 git 子模块（GitHub 私有仓库，凭据不入库），设计目标/目录结构见 docs/voice-dialogue.md「assistant/ 目录」节

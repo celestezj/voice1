@@ -309,6 +309,36 @@ sequenceDiagram
   断言逐句链式不抢发、打断丢作废句、跨句停顿不复位（跑法
   `PYTHONIOENCODING=utf-8 …/python.exe tests/test_live2d.py`，`test_say_tts.py` 同理）。
 
+## 文本输入源（键盘/脚本输入，调试用，默认关）
+
+不方便对麦克风说话时，用**文本**输入代替语音调试对话系统——**只加一个输入源，输出侧零改动**
+（控制台 / 音频 / live2d 说话框+表情全部走原逻辑）。不起脚本时原程序**完全不变**。
+
+- **怎么开**：主程序加 `--text-input-port <端口>`（默认关）起本地 TCP 监听；另开终端跑
+  `python examples/text_input.py [端口]`（默认 9123），`while input()` 每行发一条文本。
+- **与语音并存**：麦克风照常说、脚本照常敲，两路输入都有效；文本走独立 TCP 线程，天然绕开
+  回声门控 / 自播门控 / 休眠 KWS 分派这些 mic 采集层的拦截（`examples/voice_dialogue.py`
+  `cb()` 里）。
+- **文本模式语义**（与语音输入的区别，用户拍板）：
+  - **唤醒词 / 退出词无效**——输入"小爱小爱"、"拜拜"都当**普通句子送 LLM/agent**，不触发
+    唤醒/退出状态机；
+  - **休眠态自动唤醒直接对话**——休眠中直接输入问题即对话，**不播就绪语**；
+  - **打断词整行完全等于才生效**（如输入行就是"停下"）→ 立即停当前 LLM+TTS 输出，该行
+    **不进历史/不送 LLM**；无输出在途 = 什么也不做；
+  - 其余任意行 → 当一条"完整定稿句"提交（**非阻塞**：发一句可立即敲下一句），正在输出时敲
+    下一句立即打断重发（同语音 barge-in）。**打断语义比语音更强**（`barge_audio=True`）：
+    **只要 TTS 还在播就立即切掉在播音频**——哪怕 LLM 已答完、仅剩音频在播也打断
+    （用户实测"播放笑话时输入下一问，旧音频还在播"定位出的差别）；语音定稿句默认**不**打断
+    已答完的音频（让回答播完、新回复排队）——两条输入源语义不同。
+- **实现**：注入点复用 `ctrl.feed_asr_sentence(SentenceResult(...), barge_audio=True)`——与
+  麦克风定稿句同构，barge-in / post-commit / 历史 / 存档 / live2d 输出全部自动继承，输出链
+  零改动。`barge_audio` 是 `feed_asr_sentence` 的新参数（默认 False 保持语音旧行为）：
+  `in_flight or post_commit or (barge_audio and _tts_busy)` 任一成立才 `tts.interrupt()`。
+  模块 `dialogue/text_input.py`（`TextInputServer` TCP server + `route_text_line` 纯路由，
+  headless 可测）；客户端 `examples/text_input.py`。
+- **headless 测试**：`tmp/test_text_input.py`（gitignored）——`route_text_line` 路由纯逻辑
+  + `TextInputServer` TCP 集成（多客户端连/断）。
+
 ## 会话历史存档（本地记录，默认开）
 
 > **仅 LLM 模式**：`--brain agent` 时不写本地存档——历史/压缩在 claude 会话里由 claude 自己
