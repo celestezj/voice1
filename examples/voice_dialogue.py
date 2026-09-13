@@ -677,7 +677,11 @@ def main():
         """TCP 文本行 → 路由：休眠自动唤醒（不播就绪语）/ 打断词整行 hard_stop / 普通句送对话。"""
         action = route_text_line(ctrl, wake, interrupt_words, line, make_result)
         if action == INTERRUPT:
+            # route_text_line 已 hard_stop（不进历史/LLM）；live2d 与语音 KWS 打断
+            # （_on_interrupt）一致复位——否则说话框/表情卡在"正在播那句"（用户实测）。
             con.status("〔文本〕打断")    # 诊断可见（语音 KWS 打断不打印，二者不冲突）
+            if live2d is not None:
+                live2d.reset()
 
     asr.on_sentence(on_sentence)
     def _on_interrupt():
