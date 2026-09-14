@@ -197,6 +197,23 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   （每句已定稿，预览只造成拼行/省略号）；`_Console.finalize` 定稿行 `clamp=False` 完整
   显示（可折行，无省略号），`update` 实时预览仍截断防折行刷屏。验证 probe_joke_transition
   announced=6（过渡句+结论5句各定稿一行）。
+  ⑤d **心态标记回定稿行 + `--agent-stream-tts` 只在 agent 模式生效（2026-09-14 用户实测
+  `--brain llm --agent-stream-tts`）**：① 开关照读裸 `args.agent_stream_tts` 会让 LLM 模式
+  `on_ai_delta` 把含【心态：xxx】的流式预览也跳过（该跳过本为 agent 流式每句定稿后防拼行，
+  LLM 模式增量仍走预览）——修法：闭包变量 `bool(args.agent_stream_tts and agent is not None)`，
+  LLM 模式传此开关=被忽略。② 定稿行只显示切出的句子文本、心态标记被 `_find_cut` 单独切走
+  → 控制台首句无标记（曾见 `[98.91s] AI: 阿阳 那我讲一个哦`）。修法：`_pending_mood_announce`
+  （实例属性，跨多次调用存活）攒纯标记段、拼回下一个真实句子显示；连续相同标记去重（agent
+  结论开头自带标记+到达前已流式吐过同款 → 不查重拼成【心态：开心】【心态：开心】…）。TTS
+  仍剥掉不念。**③ tail 直通路径是"第一轮带标记、二轮起消失"真根因（2026-09-14 用户实测）**：
+  `_find_cut` 把句首标记切进 `_pending_mood_announce` 后，若整条回复无标点边界 → 不经过
+  `_emit_sentences`、整个落 `_llm_loop` finally 的 `tail` 直通 `_submit_tts`/`_on_ai_sentence`
+  —— 标记攒着却没拼回，控制台丢失。所有"切句→送 TTS→通知定稿"出口必须统一走
+  `_with_pending_mood(sentence)`（`_emit_sentences` / `_announce_agent_sentence` / LLM finally
+  tail / agent stream 收尾 tail 共 4 处，漏一处就丢标记）。验证 probe_llm_mood_console /
+  probe_llm_mood_two_rounds（两轮首句都带标记）/ probe_joke_transition（announced 首句带标记、
+  无重复）。**写新"切句+显示"路径记得：跨调用累计用实例属性、所有出口走 `_with_pending_mood`、
+  别用函数局部变量。**
   ⑥ **结论重播回声自屏蔽** `--replay-echo-guard-ms`（默认 1500）：**结论重播启动后短窗口内
   丢弃新 ASR 定稿句**——被 `tts.interrupt()` 切掉的过渡句尾音此刻还在房间里绕，重播刚起、
   门控 grace 又把回声喂进 ASR，VAD 闭成一条**幻影句**落在 post-commit 窗口内 → 把重播也打断

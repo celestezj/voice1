@@ -602,7 +602,10 @@ def main():
     q_wall = [None]              # 本轮问题提交时刻（monotonic，算首答时差用）
     first_ai_ts = [None]         # 本轮首个 AI 文本（首 delta）的会话轴时刻；打印过即置 None
     ai_ts_printed = [False]      # 本轮是否已给首答打过时间（同轮后续句不重复打）
-    agent_stream_tts = args.agent_stream_tts   # 供 on_ai_delta/on_ai_sentence 闭包读（流式每句定稿）
+    # 流式增量送 TTS 的开关**只在 agent 模式生效**（LLM 模式增量本就逐句送，无"过渡句"概念）。
+    # 不能裸读 args.agent_stream_tts——用户 `--brain llm --agent-stream-tts` 时若照读 True，
+    # on_ai_delta 会把 LLM 模式的流式预览（含【心态：xxx】标记）也跳过（2026-09-14 实测回归）。
+    agent_stream_tts = bool(args.agent_stream_tts and agent is not None)
 
     def _ai_answer_ts(now):
         """首答时刻（会话轴秒）——**锚在用户问题定稿时刻上**：

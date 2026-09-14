@@ -120,7 +120,9 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
   `_tail_overlap` 跳过已播开头重播（防"阿阳"整句播两遍）。**去重只对最后一个心态标记之后
   的结论本体算**——ResultMessage 全文常以过渡句开头，对全文算会把过渡句误当已播结论跳过
   打断。关=只播最终结论（旧行为零变化）。一键启动透传：
-  `start_dialogue.bat agent --agent-stream-tts`。
+  `start_dialogue.bat agent --agent-stream-tts`。**仅在 agent 模式（`--brain agent`）生效**：
+  `--brain llm` 下传它会被忽略（LLM 模式增量本就逐句送 TTS，无"过渡句"概念；2026-09-14
+  曾因裸读该开关导致 LLM 模式 `on_ai_delta` 流式预览被跳过、控制台看不到心态标记，已修）。
 - **结论重播回声自屏蔽** `--replay-echo-guard-ms`（默认 1500，仅 agent 结论含过渡句被切重播
   的那一支设置）：重播刚起瞬间新 ASR 定稿句大概率是"被切音频的回声"——过渡句被
   `tts.interrupt()` 切掉、尾音在房间里绕，回声门控的 grace 窗口又把回声喂进 ASR，VAD 闭成
@@ -666,7 +668,7 @@ A：控制台按 ASR 断句显示多条 `[时间戳]` 行，这是识别层面�
 | `[休眠] 一直不说话，我先退下啦…` | 静默超时触发，告别语回休眠 |
 | `[cs] AI: 文字` | **本轮首个** AI 回复句附时刻 = **首 token/AI 开口时刻**（**锚在用户问题定稿时刻上**：`问题audio_end + (此刻 − 问题提交时刻)`，与用户句 [x.xx-y.yys] 天然同一坐标轴、不受引擎会话起点影响——曾见用 `session_t0` 差出 ~35s 错位，锚定后不可能再跑偏；用开口而非定稿时刻，避免把「文本到齐→送 TTS」间的桥接延迟算进时间戳）；同轮后续 AI 句不重复打，新用户句/撤答复重答时复位 |
 | `AI: 文字` | AI 回复**定稿行**（`on_ai_sentence`）：每句一行**完整文本**（`finalize` 不截断，无省略号，超宽自动折行）。`--agent-stream-tts` 下 agent 流式每句送 TTS 时也走这行（含过渡句），首句带 `[cs]` 时刻；纯心态标记段不刷行 |
-| `AI: 【心态：开心】…` | 心态标记（表情）：LLM 回复自带，只在送 TTS 时剥掉不念；控制台/历史/存档保留（`--no-mood-marker` 关闭） |
+| `AI: 【心态：开心】…` | 心态标记（表情）：LLM/agent 回复自带，**每轮首句定稿行都带**——切句剥掉的纯标记段攒着（`_pending_mood_announce`）经 `_with_pending_mood` 拼回下一个真实句子显示（`_emit_sentences`/`_announce_agent_sentence`/两个 tail 直通路径共 4 个出口），不再只活在流式预览里（2026-09-14 修：曾局部变量跨 delta 丢失、无标点整段落 tail 二轮起消失、agent 连续同款标记去重）。只在送 TTS 时剥掉不念；控制台/历史/存档保留（`--no-mood-marker` 关闭） |
 | `[live2d] 联动就绪 → …` | live2d 桌宠联动已启用：心态→切表情 + 全 TTS 文本→说话框 |
 | `[live2d] 表情联动关闭…` | 启动测活连不上 → 彻底禁用不重试，对话照常只是不联动 |
 | `[live2d] live2d server 连接失败，请检查` | 运行中 live2d 中途退出：继续如常发送，每次失败打印提醒 |

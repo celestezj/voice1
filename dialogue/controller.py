@@ -136,6 +136,9 @@ class DialogueController:
                                          # 最终结论重播时按尾部重叠跳过已播前缀，防"阿阳"播两遍）
         self._agent_last_delta_ts = 0.0  # 最近一次流式增量时刻（monotonic）：idle 切句判定
                                          # （agent 工具调用期静默无增量，缓冲滞留超阈值先出声）
+        self._pending_mood_announce = "" # 切句剥掉的纯心态标记段（【心态：xxx】）：攒着拼到
+                                         # 下一个真实句子的控制台显示上——否则标记只活在预览里、
+                                         # 定稿行被覆盖后控制台看不到（LLM/agent 模式均 2026-09-14）
 
     # ---------------- 回调注册（供主程序/控制台接）----------------
     def register_callbacks(self, on_user=None, on_ai_delta=None,
@@ -236,6 +239,7 @@ class DialogueController:
             self._assistant_display = ""
             self._agent_tts_buf = ""       # agent 流式 TTS 缓冲作废
             self._agent_tts_played = ""    # 流式已播累计同样作废
+            self._pending_mood_announce = ""
             self._stream_thread = None
             self._merge_deadline = None    # 有挂起的合并窗口 → 作废（"停下"不续发）
             self._tts.interrupt()          # 立即切音频 + 清队列（快操作）
@@ -434,6 +438,7 @@ class DialogueController:
             self._assistant_display = ""
             self._agent_tts_buf = ""          # agent 流式 TTS 缓冲作废（新句取代旧回合）
             self._agent_tts_played = ""       # 流式已播累计同样作废
+            self._pending_mood_announce = ""  # 攒着的心态标记段同样作废
             if in_flight or post_commit or (barge_audio and self._tts_busy):
                 self._tts.interrupt()         # 在途吐词 / 已答未开播 / 文本强打断 → 切掉作废音频
             self._stream_thread = None        # 在途流作废（gen 已变，旧线程自行退出）
@@ -491,6 +496,7 @@ class DialogueController:
                 self._agent_evts[gen] = evt    # 该回合的收尾唤醒事件
                 self._assistant_display = ""
                 self._agent_tts_played = ""    # 新回合：流式已播累计清零（去重用）
+                self._pending_mood_announce = ""  # 新回合：攒着的心态标记段清零
                 agent_launch = (text, gen, evt)
                 messages = None
             else:
@@ -575,6 +581,9 @@ class DialogueController:
                 full = self._assistant_full        # 完整回复（保留心态标记：进历史/回调，TTS 才剥）
                 tail = self._assistant_buf.strip()  # 未切句的残句也要播出来
                 if tail:
+                    # tail 直通路径不经过 _emit_sentences，须手动拼回攒着的心态标记段
+                    # （LLM 无标点整段落 tail 时标记曾丢失，二轮起控制台看不到，2026-09-14）
+                    tail = self._with_pending_mood(tail)
                     self._submit_tts(tail)
                 self._assistant_buf = ""
                 self._assistant_full = ""
@@ -643,6 +652,19 @@ class DialogueController:
             dbg("FLUSH cut@%d %r" % (cut, sentence[:20]))
             self._announce_agent_sentence(sentence)
 
+    def _with_pending_mood(self, sentence):
+        """把攒着的纯心态标记段（_pending_mood_announce）拼到真实句子的显示文本上并清零。
+
+        `_find_cut` 会把句首 `【心态：xxx】` 单独切走（作切点），攒到下一个真实句子拼回
+        显示——否则标记只活在流式预览里、定稿行看不到（2026-09-14）。`_submit_tts` 会再
+        剥掉不念，控制台/live2d/历史保留。**所有"切句→送 TTS→通知定稿"的出口都走它**
+        （`_emit_sentences` / `_announce_agent_sentence` / 两个 `tail` 直通路径），漏一处
+        就丢标记（实测 LLM 无标点整段落 tail、二轮起标记消失）。
+        """
+        s = self._pending_mood_announce + sentence
+        self._pending_mood_announce = ""
+        return s
+
     def _announce_agent_sentence(self, sentence):
         """agent 流式切出的句子：送 TTS + 累计已播 + 通知控制台定稿行。
 
@@ -653,7 +675,14 @@ class DialogueController:
         → 不送 TTS、不打控制台行（独立 `【心态：开心】` 不刷一行）。
         """
         if not any(ch.isalnum() for ch in self._clean_for_tts(sentence)):
+            if "心态" in sentence:
+                # 纯心态标记段：攒着拼下句显示。连续相同标记去重（实测 agent 结论开头
+                # 自带【心态：xxx】，而它到达前又单独流式吐过同款标记 → 不查重会拼成
+                # 【心态：开心】【心态：开心】… 显示重复、live2d 表情重复触发）。
+                if not self._pending_mood_announce.endswith(sentence):
+                    self._pending_mood_announce += sentence
             return
+        sentence = self._with_pending_mood(sentence)  # 标记拼回显示（_submit_tts 会剥掉不念）
         self._submit_tts(sentence)
         self._agent_tts_played += self._clean_for_tts(sentence)  # 累计已播（去重用）
         if self._on_ai_sentence:
@@ -736,6 +765,7 @@ class DialogueController:
                         #     打断旧播放，从 skip 重播剩余结论（"阿阳"只播一遍的保证）
                         self._agent_tts_buf = ""          # 流式缓冲作废（残句由下方补齐）
                         self._agent_tts_played = ""       # 本回合去重完毕，清累计
+                        self._pending_mood_announce = ""  # 攒着的心态标记段同样作废
                         dbg("RESULT ctx=%s raw=%r" % (ctx, raw[:30]))
                         dbg("RESULT concl_start=%d clean_full=%r" % (concl_start, clean_full[:30]))
                         dbg("RESULT played=%r skip=%d len_clean=%d remainder=%r"
@@ -825,12 +855,16 @@ class DialogueController:
                 self._emit_sentences(gen)          # 按句送 TTS（_submit_tts 剥心态/【询问】）
                 tail = self._assistant_buf.strip()  # 未切句的残句也要播出来
                 if tail:
+                    # tail 直通路径须手动拼回攒着的心态标记段（与 LLM finally 同修，
+                    # _emit_sentences 只处理了它切出的句子、尾句标记不拼回同样丢失）
+                    tail = self._with_pending_mood(tail)
                     self._submit_tts(tail)
                 self._assistant_buf = ""
                 self._assistant_full = ""
                 self._assistant_display = ""
                 self._agent_tts_buf = ""
                 self._agent_tts_played = ""
+                self._pending_mood_announce = ""
                 dbg("STREAM_THREAD done gen=%d" % gen)
                 if self._mood_marker and self._mood is None:
                     self._mood = "平和"            # agent 没带标记 → 默认心态
@@ -894,7 +928,17 @@ class DialogueController:
                 self._assistant_buf = self._assistant_buf[cut:]
                 first = self._tts_job is None     # 本回合首句（尚无 TTS 任务在册）
             if not any(ch.isalnum() for ch in self._clean_for_tts(sentence)):
-                continue   # 纯标点段/纯心态标记段（如"。。"/"【心态：期待】"）丢弃后继续找
+                if "心态" in sentence:
+                    # 纯心态标记段（如"【心态：期待】"）攒着：_emit_sentences 每 delta 调
+                    # 一次，局部变量跨调用即丢（实测 LLM 流式首 delta 带标记、定稿行却无），
+                    # 必须用实例属性 _pending_mood_announce（agent 流式同源，见
+                    # _announce_agent_sentence）跨调用攒着拼到下一个真实句子显示上。
+                    # 连续相同标记去重（同 _announce_agent_sentence，防"已流式吐过的标记
+                    # + 结论开头自带的同款标记"拼成双份显示）。
+                    if not self._pending_mood_announce.endswith(sentence):
+                        self._pending_mood_announce += sentence
+                continue                          # 纯标点段（"。。"）丢弃后继续找
+            sentence = self._with_pending_mood(sentence)  # 标记拼回显示（_submit_tts 会剥掉不念）
             if first and self._reply_hold > 0:
                 time.sleep(self._reply_hold)      # 锁外：给用户续句打断的机会
                 with self._lock:
