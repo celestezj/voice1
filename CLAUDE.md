@@ -112,6 +112,11 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   无则新建；llm 模式自动带 `--llm-config dialogue\config.local.json`（agent 模式不带）；
   `vits` = 换 vits 多音色、`melo` = 显式 melo。透传例：
   `start_dialogue.bat agent vits --vad-tail 600 --tts-voice-id 可莉`。
+  **默认参数（2026-09-14）**：一键启动固定带 `--agent-stream-tts --debug-tts`——agent
+  流式增量送 TTS + 会话调试日志落 `sessions/`（排"说了 X 就卡住"全靠它）。两者都是
+  `store_true` **无法命令行取反**，要关就改脚本删 `DEFAULTS` 里的参数（见
+  `docs/voice-dialogue.md`「一键启动脚本」）。`--agent-stream-tts` 仅 agent 模式生效、
+  LLM 模式被忽略（⑤d），`--debug-tts` 各模式都写日志。
 - **参数含义白话版 + 快速开始 + 架构时序图**（vad-tail / post-commit-window / echo-guard /
   merge-window 的直觉 + 时间线 + 校准 + mermaid 线程时序）：见
   [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。用户强调这些参数很难懂，解释时先讲

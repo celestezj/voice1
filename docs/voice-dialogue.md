@@ -45,6 +45,14 @@
 
 > 透传参数走 argparse「后者覆盖」：`--tts-backend melo` 直接透传也能在最后覆盖前面的 vits 快捷词（同理 `--tts-voice-id`/`--vad-tail` 等）。
 
+**默认参数（2026-09-14 起）**：一键启动固定带 `--agent-stream-tts --debug-tts`——
+① agent 流式增量送 TTS（仅 agent 模式生效，LLM 模式被忽略，见下「agent 流式送 TTS」）；
+② 会话调试日志落 `sessions/debug_tts_*.log`（排查"说了 X 就卡住/停下无效"靠它）。
+两者都是 `store_true`，**无法在命令行取反**（无 `--no-X`）——要关就改脚本删
+`DEFAULTS` 变量（bat：`start_dialogue.bat` 内 `set "DEFAULTS=..."`；sh：
+`start_dialogue.sh` 内 `DEFAULTS="..."`）里的参数。直接跑 `voice_dialogue.py`（不经脚本）
+仍默认关、零变化。
+
 **推荐启动**（GPU 机器）：
 
 ```bash

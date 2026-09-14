@@ -34,7 +34,10 @@ case "${1:-}" in
     vits) TTS_BACKEND="--tts-backend vits"; shift ;;
     melo) TTS_BACKEND="--tts-backend melo"; shift ;;
 esac
+# 默认参数：agent 流式增量送 TTS + 会话调试日志落 sessions/
+# （store_true 无法命令行取反——要关就删掉这两个参数，见 docs/voice-dialogue.md）
+DEFAULTS="--agent-stream-tts --debug-tts"
 exec python examples/voice_dialogue.py \
     --asr-device cuda --tts-device cuda $TTS_BACKEND --vad-tail 300 --vad-threshold-db -42 \
     --system-prompt dialogue/user_prompt.txt --llm-config dialogue/config.local.json \
-    --tts-normalize rms --live2d-port 5000 "$@"
+    --tts-normalize rms --live2d-port 5000 $DEFAULTS "$@"

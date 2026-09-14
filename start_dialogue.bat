@@ -172,7 +172,11 @@ if "%BRAIN%"=="agent" (
     )
 )
 
-set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda %TTSBACKEND% --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %EXTRA%"
+rem 5b. default flags: agent-stream-tts (agent 流式增量送 TTS) + debug-tts (会话调试日志落 sessions/)
+rem     store_true 无法在命令行取反——要关就注释本行或删参数（见 docs/voice-dialogue.md）
+set "DEFAULTS=--agent-stream-tts --debug-tts"
+
+set "CMD=python examples\voice_dialogue.py --asr-device cuda --tts-device cuda %TTSBACKEND% --vad-tail 300 --vad-threshold-db -42 --system-prompt dialogue\user_prompt.txt %LLMCFG% --tts-normalize rms --live2d-port 5000 --brain %BRAIN% %AGENT_RESUME% %DEFAULTS% %EXTRA%"
 echo [run] %CMD%
 %CMD%
 

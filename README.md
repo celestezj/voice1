@@ -34,7 +34,9 @@ python bench/bench_asr.py --backend paraformer --device cuda --tag my     # 验�
   `PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts-device cuda --vad-tail 300`
 - **一键启动脚本**：Windows `start_dialogue.bat [llm|agent] [vits|melo]`，或 `bash start_dialogue.sh`；
   默认 llm+melo，`vits`=换多音色，`agent`=本地 claude 大脑，任意组合+透传见
-  [`docs/voice-dialogue.md`](docs/voice-dialogue.md)「一键启动脚本」。
+  [`docs/voice-dialogue.md`](docs/voice-dialogue.md)「一键启动脚本」。脚本默认带
+  `--agent-stream-tts --debug-tts`（agent 流式送 TTS + 会话调试日志落 `sessions/`；
+  要关就改脚本删参数，见上文）
 - 语音对话：快速开始 + 参数白话解释 + 架构时序图：见 [`docs/voice-dialogue.md`](docs/voice-dialogue.md)。
 - 文本输入源（调试，默认关）：`--text-input-port` + `examples/text_input.py`，与麦克风并存——见
   docs/voice-dialogue.md「文本输入源」。
