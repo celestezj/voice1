@@ -22,13 +22,30 @@ import re
 import threading
 import time
 
+from .debug_log import dbg   # 临时：VOICE1_DEBUG_TTS=1 才落盘，定位后删
+
 
 class DialogueController:
     # LLM 切句边界 + 超长无标点硬切参数
     _BOUNDARY = "。！？…；\n"     # 句末边界（送 TTS 的切点）
     _SOFT_CUT = " 　，、："    # 兜底硬切的可落点：空格分句缝 + 逗号类（非句末边界）
+    # 句末语气词（白话口语天然句尾）：流式缓冲以它结尾且无标点 → 视为完整句先送出，
+    # 否则"我再确认一下大后天的天气哈"这类无句号的过渡句卡在缓冲，工具调用期间出声前
+    # 干等（2026-09-13 实测）。切错最多多一个停顿，无碍正确性。
+    _PARTICLES = "哈吧呢嘛啊哦呀啦哟咯嘞呗呵"
     _HARD_MAX = 40                # 无标点累积超此长度 → 兜底硬切（保首包延迟）
     _SOFT_WINDOW = 20             # 硬切时在末 _SOFT_WINDOW 字符里回找软分句缝（绝不撕词）
+    # 结论与流式文本的"未播残尾"短于此 → 视为已全量流式（branch a 不打断）。修金价冻结
+    # （2026-09-14 实测）：ResultMessage 到达时流式缓冲还压着句末"。"没切出来，skip 只差 1
+    # 字没盖满 → 旧逻辑落进 branch c，`tts.interrupt()` 把**已入队未开播**的整条结论音频
+    # 全取消，重播又只有"。"（_find_cut 吐不出 <2 字句、_submit_tts 丢纯标点）→ 彻底静音。
+    # 残尾 ≤ 此值 → 队列里就是结论本体，让它自然播完；残尾是纯标点/尾词，值不得打断。
+    _TRIVIAL_TAIL = 6
+    # agent 流式缓冲滞留超此秒数（无标点无语气词、agent 静默——工具调用期）→ 整体切句送出。
+    # 过渡句"好，讲个新笑话给你"以"你"结尾无切点，会卡到最终结论才切（实测 3.7s 干等、
+    # 出声前工具都跑完了）；静默超阈值说明 agent 在忙别的（工具/思考），当前缓冲大概率是
+    # 完整过渡句 → 先出声（2026-09-14 实测金价过渡句后跟 \n 能立即切、笑话这句却卡死）。
+    _AGENT_IDLE_FLUSH_MS = 1.5
     # 引号（中文/ASCII）：送 TTS 前剥掉——语音不念引号，`。”`/`？"`/`。" "` 这类"句末标点+
     # 引号"连在一起会让 TTS 前端对全角引号处理不稳、合成怪尾音（实测苏联笑话 2026-09-13）。
     _QUOTE_RE = re.compile(r"[“”‘’\"']")
@@ -53,7 +70,7 @@ class DialogueController:
     def __init__(self, llm, tts, *, system_prompt=None, max_history_messages=None,
                  reply_hold=0.0, merge_window=0.0, post_commit_window=0.0,
                  max_context_tokens=40000, recent_keep=6, headroom=4000,
-                 mood_marker=True, agent=None):
+                 mood_marker=True, agent=None, replay_echo_guard=1.5):
         # mood_marker=False → 本类的全部心态逻辑跳过（剥标记/解析/默认心态），
         # 行为与本次改动前完全一致；是否让 LLM 吐标记由 user_prompt.txt 里的约定决定。
         #
@@ -85,6 +102,12 @@ class DialogueController:
         self._merge_waiter = None                  # 合并窗口守护线程
         self._post_commit_window = float(post_commit_window)  # post-commit barge 窗口秒（0=关）
         self._turn_first_submit_ts = None          # 本轮首句提交时刻（post-commit 窗口锚点）
+        self._replay_echo_guard = float(replay_echo_guard)  # 结论重播后的回声自屏蔽秒（0=关）
+        self._replay_echo_guard_until = 0.0        # 回声自屏蔽截止（monotonic）：期间新 ASR 句
+                                                   # 视为"被切音频的回声"丢弃——不打断重播
+        self._replay_kws_until = 0.0               # 重播期 KWS"停下"屏蔽截止（monotonic）：
+                                                   # 重播音频会被回声门控喂进"停下"KWS 自触发
+                                                   # 自杀（金价重播冻结实测根因），窗口内忽略 KWS
         self._tts_job = None         # 最近提交的 TTS Job（voice0 返回值，含 .done/.wait）
         self._tts_busy = False       # TTS 是否在播/待播（echo 门控依据）
         self._lock = threading.RLock()     # RLock：_llm_loop finally 在锁内 _submit_tts 会重入
@@ -103,6 +126,16 @@ class DialogueController:
         self._agent_evts = {}            # gen → Event（每回合一个，结果/作废唤醒对应收尾线程）
         self._agent_error = None         # 最近一次 agent 回合的错误文本（None=正常）
         self._assistant_display = ""     # agent 流式出字缓冲（仅控制台显示；TTS 仍取最终结论）
+        # agent 流式送 TTS（--agent-stream-tts，默认关）：模型边生成边按句播报——
+        # 含工具调用前的过渡句/思考段（实测「我把未来七天的天气捋一遍给你哈」只显示不播、
+        # 出声前干等工具 7-8s 的体验问题）；最终结论一到立即 interrupt 打断重播。
+        # 关 = 只播最终结论（旧行为，零变化）。
+        self._agent_stream_tts = False   # 开关（set_agent 传入）
+        self._agent_tts_buf = ""         # 流式增量待切句缓冲（仅 _agent_stream_tts 时使用）
+        self._agent_tts_played = ""      # 流式已 submit 的 TTS 文本累计（_clean_for_tts 后；
+                                         # 最终结论重播时按尾部重叠跳过已播前缀，防"阿阳"播两遍）
+        self._agent_last_delta_ts = 0.0  # 最近一次流式增量时刻（monotonic）：idle 切句判定
+                                         # （agent 工具调用期静默无增量，缓冲滞留超阈值先出声）
 
     # ---------------- 回调注册（供主程序/控制台接）----------------
     def register_callbacks(self, on_user=None, on_ai_delta=None,
@@ -118,9 +151,13 @@ class DialogueController:
         self._on_merge_rollback = on_merge_rollback   # post-commit barge 撤答复（供控制台提示）
         self._on_mood = on_mood
 
-    def set_agent(self, agent):
-        """绑定 agent 客户端并接管其结果回调（agent 模式大脑）。须在 agent.start() 前调用。"""
+    def set_agent(self, agent, *, stream_tts=False):
+        """绑定 agent 客户端并接管其结果回调（agent 模式大脑）。须在 agent.start() 前调用。
+
+        stream_tts=True：agent 流式增量（含工具调用前的过渡句/思考）也按句送 TTS，
+        最终结论到达立即打断重播；False=只播最终结论（默认，旧行为）。"""
         self._agent = agent
+        self._agent_stream_tts = bool(stream_tts)
         if agent is not None:
             agent.set_callbacks(on_result=self._on_agent_result,
                                 on_partial=self._on_agent_partial)
@@ -190,12 +227,15 @@ class DialogueController:
             if self._closed:
                 return
             self._gen += 1
+            dbg("HARD_STOP gen=%d" % self._gen)
             if self._user_turn:
                 self._history.append({"role": "user", "content": self._user_turn})
                 self._user_turn = ""
             self._assistant_buf = ""
             self._assistant_full = ""
             self._assistant_display = ""
+            self._agent_tts_buf = ""       # agent 流式 TTS 缓冲作废
+            self._agent_tts_played = ""    # 流式已播累计同样作废
             self._stream_thread = None
             self._merge_deadline = None    # 有挂起的合并窗口 → 作废（"停下"不续发）
             self._tts.interrupt()          # 立即切音频 + 清队列（快操作）
@@ -206,21 +246,57 @@ class DialogueController:
         self._maybe_compress()             # 历史变了，检查是否需要压缩
 
     # ---------------- TTS 提交 + 忙碌跟踪（voice0 Job.done，不改 voice0）----------------
+    def _clean_for_tts(self, sentence):
+        """剥掉语音不念的标记：引号/【询问】/心态/括号。返回清理后文本（幂等）。
+
+        agent 流式去重用（_agent_tts_played 累计的是清理后文本），与 _submit_tts 同源。
+        """
+        sentence = self._QUOTE_RE.sub("", sentence)    # 剥引号：`。”`→`。`、`？"`→`？`（TTS 不念引号）
+        sentence = self._ASK_RE.sub("", sentence)      # 【询问】标记剥掉不念（正文/存档保留）
+        if self._mood_marker:                          # 心态标记【心态：xxx】只在送 TTS 时剥掉不读
+            sentence = self._MOOD_SUB.sub("", sentence)
+        sentence = self._BRACKET_RE.sub("", sentence)  # 剥括号：`？》】`→`？`、`《…`→`…`（TTS 不念括号）
+        return sentence
+
+    @staticmethod
+    def _tail_overlap(played, result):
+        """result 开头在 played 尾部已播的重叠字符数（0=无重叠）。
+
+        只匹配 **played 尾部**——过渡句（工具调用前的"我把…捋一捋哈"，不在最终结论里）
+        自然被排除；最终结论开头被流式 partial 整句播过的部分返回其长度，供重播跳过。
+        保守：找不到尾部匹配 → 0（全量重播，宁重复不丢内容）。
+        """
+        if not played or not result:
+            return 0
+        n = min(len(played), len(result))
+        for i in range(n, 0, -1):
+            if played.endswith(result[:i]):
+                return i
+        return 0
+
     def _submit_tts(self, sentence):
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
         if not any(ch.isalnum() for ch in sentence):
             return      # 纯标点/空白段（换行残留的 `"》》`、`"` 等）不送 TTS——避免合成标点怪声
-        sentence = self._QUOTE_RE.sub("", sentence)    # 剥引号：`。”`→`。`、`？"`→`？`（TTS 不念引号）
+        sentence = self._clean_for_tts(sentence)
         if not any(ch.isalnum() for ch in sentence):
-            return      # 剥引号后若只剩标点（如独立 `。”`）也不送
-        sentence = self._ASK_RE.sub("", sentence)      # 【询问】标记剥掉不念（正文/存档保留）
-        if self._mood_marker:                          # 心态标记【心态：xxx】只在送 TTS 时剥掉不读
-            sentence = self._MOOD_SUB.sub("", sentence)
-            if not sentence:
-                return                                # 纯标记残句剥完为空 → 无需播
-        sentence = self._BRACKET_RE.sub("", sentence)  # 剥括号：`？》】`→`？`、`《…`→`…`（TTS 不念括号）
-        if not any(ch.isalnum() for ch in sentence):
-            return      # 剥括号后若只剩标点（如独立 `》】`）也不送
+            return      # 剥净后纯标点/纯标记（如独立 `。”`、`【心态：xxx】`）也不送
+        dbg("TTS_SUBMIT text=%r" % sentence[:24])
+        if self._agent_stream_tts:
+            # agent 流式送 TTS：本次提交的音频是 **AI 自己的声音**——播放期会被回声门控
+            # 喂进"停下"KWS（ingest_kws_only）。**KWS 守卫原来只在 branch c（ResultMessage
+            # 处理时）设置，覆盖不到"流式首播窗口"**：ResultMessage 可能延迟（实测文本早到、
+            # 结果晚 35s），此时流式 O1 已先开播，AI 自己的"阿阳，从八百三十四块…"触发
+            # "停下"KWS → 守卫未设 → hard_stop → O1 被杀 + 结果 ctx 代际已变被 DISCARD →
+            # 重播不提交 → 彻底静音（金价冻结真根因，2026-09-14）。故每次流式/重播提交
+            # 都按**本次句的估算播放时长**顺延屏蔽窗口（宁多勿少——重播/自播是已听内容，
+            # 真"停下"等播完再生效损失最小；文本输入打"停下"走 hard_stop 不受此守卫影响）。
+            est = max(self._replay_echo_guard, len(sentence) / 5.0 + 3.0)
+            self._replay_kws_until = max(self._replay_kws_until,
+                                         time.monotonic() + est)
+            dbg("KWS_GUARD extend %.1fs len=%d until=%.1fs"
+                % (est, len(sentence),
+                   self._replay_kws_until - time.monotonic()))
         job = self._tts.submit(sentence)
         with self._lock:
             if self._turn_first_submit_ts is None:
@@ -249,6 +325,25 @@ class DialogueController:
                     self._tts_job = None
                     return                 # 排空
                 # 已有更新的 job → 继续盯它
+
+    def echo_guard_active(self):
+        """结论重播后回声自屏蔽窗口内（agent 结论被打断重播后 ~1.5s）：新 ASR 定稿句
+        大概率是"被切音频的回声"（重播刚起、AI 上一句尾音还在房间里绕）→ 调用方丢弃，
+        否则这条幻影句会落在 post-commit 窗口里把重播打断（2026-09-14 实测冻结根因：
+        "金价卡在'给你'"——过渡句被切、尾音回声喂 ASR → 幻影句 → gen+1 取消重播、
+        GPU 上重播两句都在合成中 → 全部 stale 跳过 → 无音频 + 气泡冻住）。"""
+        return self._replay_echo_guard > 0 and time.monotonic() < self._replay_echo_guard_until
+
+    def kws_guard_active(self):
+        """结论重播期间（branch c 后按重播文本时长估算）**屏蔽"停下"KWS 硬停**。
+
+        重播是 AI 自己重读结论，播放期回声门控把 mic 喂给"停下"KWS 检测器（ingest_kws_only）
+        ——AI 自己的重播音频可能被 KWS 自触发（"阿阳，从八百三十四块…"实测把重播杀死、
+        气泡冻在"阿阳"、后面无声，2026-09-14 金价冻结根因；天气重播没事=文本不触发）。
+        窗口内真说"停下"也等重播播完才生效——重播内容是已听过的，损失最小。
+        只在 branch c（真打断重播）设置；正常播放期 KWS 照常可用。
+        """
+        return time.monotonic() < self._replay_kws_until
 
     # ---------------- 历史压缩（事件驱动后台线程，不阻塞对话）----------------
     def _maybe_compress(self):
@@ -319,6 +414,11 @@ class DialogueController:
         with self._lock:
             if self._closed:
                 return
+            if self.echo_guard_active():
+                # 结论重播后的回声自屏蔽窗口内 → 丢弃（AI 被切音频的回声，非用户意图）。
+                # 只拦"定稿句"，麦克风采集/partial 不受影响；窗口过后恢复正常。
+                dbg("FEED DROP(echo guard) gen=%d %r" % (self._gen, text[:20]))
+                return
             in_flight = self._stream_thread is not None and self._stream_thread.is_alive()
             post_commit = (not in_flight and self._post_commit_window > 0
                            and self._tts_busy
@@ -328,9 +428,12 @@ class DialogueController:
                 self._rollback_last_turn_locked()   # 撤下 (残句→答复)，残句回到本轮累计
             self._user_turn = (self._user_turn + text) if self._user_turn else text
             self._gen += 1
+            dbg("FEED gen=%d text=%r" % (self._gen, text[:24]))
             self._assistant_buf = ""          # 旧流作废：清缓冲与完整文本
             self._assistant_full = ""
             self._assistant_display = ""
+            self._agent_tts_buf = ""          # agent 流式 TTS 缓冲作废（新句取代旧回合）
+            self._agent_tts_played = ""       # 流式已播累计同样作废
             if in_flight or post_commit or (barge_audio and self._tts_busy):
                 self._tts.interrupt()         # 在途吐词 / 已答未开播 / 文本强打断 → 切掉作废音频
             self._stream_thread = None        # 在途流作废（gen 已变，旧线程自行退出）
@@ -387,6 +490,7 @@ class DialogueController:
                 evt = threading.Event()
                 self._agent_evts[gen] = evt    # 该回合的收尾唤醒事件
                 self._assistant_display = ""
+                self._agent_tts_played = ""    # 新回合：流式已播累计清零（去重用）
                 agent_launch = (text, gen, evt)
                 messages = None
             else:
@@ -486,22 +590,99 @@ class DialogueController:
 
     # ---------------- agent 模式（brain=agent，旁路历史/压缩/系统提示词）----------------
     def _on_agent_partial(self, ctx, delta):
-        """agent 流式出字（仅控制台显示；TTS 仍只取最终结论）。在 agent 循环线程执行。
-
-        快操作（持锁累加 + 控制台原地刷新），绝不阻塞 agent 循环。
+        """agent 流式出字：控制台显示（默认）+ 可选流式送 TTS（_agent_stream_tts 开时）。
+        在 agent 循环线程执行，快操作（持锁累加 + 控制台刷新 + 非阻塞入队），不阻塞生成。
         """
         with self._lock:
             if self._closed or ctx != self._gen:
                 return
             self._assistant_display += delta
             disp = self._assistant_display
+            dbg("PARTIAL ctx=%s buf=%d delta=%r" % (ctx, len(self._agent_tts_buf), delta[:20]))
+            if self._agent_stream_tts:
+                self._agent_tts_buf += delta
+                self._agent_last_delta_ts = time.monotonic()   # idle 切句判定基准
+                self._flush_agent_stream_locked()   # 边生成边按句送 TTS
         if self._on_ai_delta:
             self._on_ai_delta(delta, disp)
+
+    def _agent_mood_pending(self, buf):
+        """buf 含未闭合的心态标记（跨 delta 到达中）→ 暂不切句，等标记闭合。
+
+        心态标记【心态：xxx】可能被 delta 切开（如「【心态」「：」「期待】」），
+        未闭合就切句送出，_MOOD_SUB 剥不掉半截标记，TTS 会把「【心态」念出来。
+        """
+        if not self._mood_marker:
+            return False
+        if self._MOOD_RE.search(buf):
+            return False                       # 已有完整闭合标记，可切
+        return bool(re.search(r"[【\[]心态", buf))   # 有标记字样但未闭合
+
+    def _flush_agent_stream_locked(self):
+        """agent 流式增量按句切出送 TTS（仅 _agent_stream_tts 时调用）。调用方持锁。
+
+        心态标记未闭合不切句；切出的句子走 `_submit_tts`（剥心态/引号/括号，纯标点丢弃）。
+        在 agent 循环线程执行——submit 非阻塞入队（微秒级），绝不阻塞 agent 生成。
+        """
+        while self._agent_tts_buf:
+            if self._agent_mood_pending(self._agent_tts_buf):
+                return                          # 心态标记跨 delta 到达中，等补齐
+            cut = self._find_cut(self._agent_tts_buf)
+            if cut is None:
+                # 无标点无标记 → 若缓冲以句末语气词结尾且够长，视为完整句先送出
+                # （白话口语"…哈/哦/吧"是天然句尾，工具调用期间不再干等；切错只多一停顿）。
+                b = self._agent_tts_buf
+                if len(b) >= 4 and b[-1] in self._PARTICLES \
+                        and not self._agent_mood_pending(b):
+                    sentence = b.strip()
+                    self._agent_tts_buf = ""
+                    if any(ch.isalnum() for ch in sentence):
+                        dbg("FLUSH particle %r" % sentence[:20])
+                        self._submit_tts(sentence)
+                        self._agent_tts_played += self._clean_for_tts(sentence)
+                return
+            sentence = self._agent_tts_buf[:cut].strip()
+            self._agent_tts_buf = self._agent_tts_buf[cut:]
+            if any(ch.isalnum() for ch in sentence):
+                dbg("FLUSH cut@%d %r" % (cut, sentence[:20]))
+                self._submit_tts(sentence)      # RLock 内重入 submit；非阻塞入队
+                self._agent_tts_played += self._clean_for_tts(sentence)  # 累计已播（去重用）
+
+    def _idle_flush_agent_stream_locked(self):
+        """agent 静默期流式缓冲兜底切句（仅 _agent_stream_tts 时调用）。调用方持锁。
+
+        触发条件：缓冲非空 + 心态标记已闭合 + 最近一次增量已停滞 ≥ _AGENT_IDLE_FLUSH_MS。
+        情形 = agent 在跑工具/思考（长时间无 delta），缓冲里滞留的是一句完整过渡句
+        （如"好，讲个新笑话给你"——"你"不是句末语气词也没有标点，正常切句永远等不到
+        切点，实测卡 3.7s 干等）。此刻把它整段送出声：过渡句先播、工具跑完结论到达时
+        `_tail_overlap` 会把过渡句从结论前缀排除（去重），不会播两遍。
+        """
+        if not self._agent_tts_buf:
+            return
+        if self._agent_mood_pending(self._agent_tts_buf):
+            return                               # 心态标记跨 delta 到达中，等补齐
+        if time.monotonic() - self._agent_last_delta_ts < self._AGENT_IDLE_FLUSH_MS:
+            return                               # 还在活跃产出（agent 打字中），不打断节奏
+        sentence = self._agent_tts_buf.strip()
+        self._agent_tts_buf = ""
+        if any(ch.isalnum() for ch in sentence):
+            dbg("FLUSH idle %.2fs %r" % (time.monotonic() - self._agent_last_delta_ts,
+                                         sentence[:20]))
+            self._submit_tts(sentence)
+            self._agent_tts_played += self._clean_for_tts(sentence)  # 过渡句算"已播"，结论去重
 
     def _on_agent_result(self, ctx, text, is_error):
         """agent 最终结论回来（agent 循环线程）。ctx 作废（被打断/被取代）→ 只唤醒不碰状态。
 
         锁内只做状态填充 + evt.set()（最后一步才唤醒，保证收尾线程读到就绪状态）。
+        _agent_stream_tts 开时：最终结论到达按三态收尾（见函数内注释）——结论整段已进
+        流式队列 → 不打断自然播完（**打断会把已入队未开播的结论音频全取消 → 完全静音**，
+        2026-09-13 实测）；已播全是结论前缀 → 不打断只补送剩余；已播含过渡句/思考段 →
+        立即 interrupt 打断 + 从 skip 重播剩余（`_tail_overlap` 尾部重叠——过渡句不在
+        结论里自动排除，否则"阿阳"整句播两遍）。**去重重叠只对"最后一个心态标记之后"的
+        结论本体算**——ResultMessage 全文常以过渡句开头（"我再确认一下大后天的天气哈【心态：
+        开心】阿阳…"），对全文算会把过渡句误当"已播的结论开头"跳过打断（2026-09-13 实测：
+        结论都出来了还不打断）。
         """
         with self._lock:
             if not self._closed and ctx == self._gen:
@@ -509,10 +690,89 @@ class DialogueController:
                     self._agent_error = text or "agent 出错了"
                 else:
                     self._agent_error = None
-                    self._assistant_buf = text or ""
                     self._assistant_full = text or ""
+                    raw = text or ""
+                    if self._agent_stream_tts:
+                        # 结论以最后一个心态标记为界：标记前是过渡句/思考段（要打断），
+                        # 标记后才是结论本体。去重重叠只对结论本体算——若对整段全文算，
+                        # ResultMessage 含过渡句开头时（"…哈【心态：开心】阿阳…"），
+                        # 过渡句会被误当"已播的结论开头"跳过打断（2026-09-13 实测）。
+                        concl_start = 0
+                        for m in self._MOOD_RE.finditer(raw):
+                            concl_start = m.end()
+                        clean_full = self._clean_for_tts(raw[concl_start:])
+                        played = self._agent_tts_played
+                        # 换行归一化（2026-09-14 实测笑话场景）：流式切句 `_find_cut` 在
+                        # `\n` **边界处切**（`\n` 归属下句/被吞），入队的句子文本**不含** `\n`；
+                        # 而 clean_full 保留 `\n` → 两侧字符错位 → `_tail_overlap` 算不出重叠
+                        # （skip=0）→ 明明结论几乎全量流式，却误落 branch c 取消+整段重播。
+                        # 比对齐：`\n` 对 TTS 发音无影响，比较/去重前剥掉即可（实录见
+                        # debug_tts_20260914_183135.log：skip=0 而实际 6 句已流式全进队）。
+                        nclean = clean_full.replace("\n", "")
+                        nplayed = played.replace("\n", "")
+                        skip = self._tail_overlap(nplayed, nclean)
+                        remainder = nclean[skip:] if skip < len(nclean) else ""
+                        clean_full = nclean                # 后续用归一化版（remainder/长度/守卫）
+                        # 四态（2026-09-13/14 实测教训：打断会把"已入队未开播"的结论音频
+                        # 全取消 → 完全静音；故只有"已播含过渡句且残尾值得重播"才打断）：
+                        #  a) 结论整段已进流式队列（skip 盖满）→ 不打断，让队列自然播完
+                        #  a') 结论几乎全量流式、只差极短残尾（≤_TRIVIAL_TAIL）→ 不打断：
+                        #      实测残尾是流式缓冲没切出的句末"。"（skip 155/156），旧逻辑
+                        #      落 branch c 把整条队列 interrupt 掉、重播又吐不出 1 字"。"，
+                        #      = 金价冻结"说了阿阳就卡住"真根因（2026-09-14）。队列里就是
+                        #      结论本体，让它自然播完；残尾是纯标点/尾词，值不得打断。
+                        #  b) 已播全是结论前缀（skip==len(played)，无过渡句）→ 不打断，
+                        #     只补送未播的剩余结论（残句在 remainder 里补齐）
+                        #  c) 已播含过渡句/思考段且残尾有实义（skip<len(played)）→ 立即
+                        #     打断旧播放，从 skip 重播剩余结论（"阿阳"只播一遍的保证）
+                        self._agent_tts_buf = ""          # 流式缓冲作废（残句由下方补齐）
+                        self._agent_tts_played = ""       # 本回合去重完毕，清累计
+                        dbg("RESULT ctx=%s raw=%r" % (ctx, raw[:30]))
+                        dbg("RESULT concl_start=%d clean_full=%r" % (concl_start, clean_full[:30]))
+                        dbg("RESULT played=%r skip=%d len_clean=%d remainder=%r"
+                            % (played[:30], skip, len(clean_full), remainder[:20]))
+                        covered = skip >= len(clean_full) or \
+                            len(remainder) <= self._TRIVIAL_TAIL
+                        dbg("RESULT branch=%s interrupt=%s" %
+                            ("a" if covered else ("c" if skip < len(played) else "b"),
+                             not covered and skip < len(played)))
+                        if covered:
+                            self._assistant_buf = ""      # 整段已进队/残尾可忽略 → 无需重播
+                            # 自然播放防御：结论整段已入队、队列深——per-submit 守卫按单句
+                            # 估算时长，队列延迟会让它**在句子真正出声前就过期**。AI 自己的
+                            # 音频被回声门控喂进"停下"KWS，出声即可能自触发（金价数字实测
+                            # 触发过）。故按**整段结论时长**顺延守卫，覆盖已入队未开播的整段
+                            # 自然播放；真"停下"等播完再生效（已听内容损失最小，⑦ 同款权衡）。
+                            est = len(clean_full) / 5.0 + 3.0
+                            self._replay_kws_until = max(self._replay_kws_until,
+                                                         time.monotonic() + est)
+                            dbg("KWS_GUARD natural %.1fs len=%d" % (est, len(clean_full)))
+                        else:
+                            self._assistant_buf = remainder  # 补送/重播未播部分
+                            if skip < len(played):
+                                self._tts.interrupt()     # 切掉过渡句/思考段旧播放
+                                # 被切音频尾音此刻还在房间里绕，重播又马上起——回声会被门控
+                                # grace 喂进 ASR 闭成幻影句落在 post-commit 窗口打断重播
+                                # （实测冻结根因）。短窗口内丢弃新 ASR 句 = 自屏蔽。
+                                self._replay_echo_guard_until = \
+                                    time.monotonic() + self._replay_echo_guard
+                                # KWS 自屏蔽：重播音频会被回声门控喂进"停下"KWS 自触发自杀
+                                # （金价重播冻结实测根因，2026-09-14）。按重播文本时长估算
+                                # 屏蔽窗口（宁多勿少——重播是已听过的内容，等播完损失最小）。
+                                replay_len = len(clean_full[skip:])
+                                self._replay_kws_until = \
+                                    time.monotonic() + max(self._replay_echo_guard,
+                                                           replay_len / 5.0 + 3.0)
+                                dbg("RESULT kws_guard=%.1fs replay_len=%d" %
+                                    (self._replay_kws_until - time.monotonic(), replay_len))
+                    else:
+                        self._assistant_buf = raw
                     if self._mood_marker:
                         self._parse_mood_locked()
+            elif not self._closed:
+                # 结果回来时代际已变（新句/幻影句抢在结果前）→ 本回合结果被丢弃。打点以便
+                # 区分"重播未提交"（结果被丢）与"重播提交后被杀"（结果处理了、后续又被打断）。
+                dbg("RESULT DISCARD ctx=%s gen=%s" % (ctx, self._gen))
             evt = self._agent_evts.get(ctx)
             if evt is not None:
                 evt.set()                          # 唤醒该回合的收尾线程
@@ -522,11 +782,27 @@ class DialogueController:
 
         与 LLM 路径 finally 一致：完整文本按句送 TTS、心态兜底「平和」；**不 commit 历史**
         （上下文在 claude 会话里，agent 模式旁路自实现历史），只清本轮累计。
+
+        _agent_stream_tts 开时在等待期间做 **idle 切句**：agent 工具调用期无流式增量
+        （静默数秒），缓冲里滞留的完整过渡句（如"好，讲个新笑话给你"以"你"结尾无标点无
+        语气词，没有切点）会干等到最终结论才出声（实测 2026-09-14：笑话过渡句卡 3.7s）。
+        用带超时的 evt.wait 循环，静默超过 _AGENT_IDLE_FLUSH_MS → 把整段缓冲先送出声。
         """
-        evt.wait()
+        while True:
+            # 0.5s 分片睡：结果/回合作废到达 evt 立即唤醒；否则每 0.5s 检查一次 idle
+            if evt.wait(0.5):
+                break
+            with self._lock:
+                if self._closed or gen != self._gen:
+                    self._agent_evts.pop(gen, None)   # 回合作废：清掉本回合唤醒事件再退
+                    return
+                if self._agent_stream_tts:
+                    self._idle_flush_agent_stream_locked()
+        dbg("STREAM_THREAD woke gen=%d" % gen)
         with self._lock:
             self._agent_evts.pop(gen, None)
             if self._closed or gen != self._gen:
+                dbg("STREAM_THREAD ABORT gen=%d cur=%d closed=%s" % (gen, self._gen, self._closed))
                 return                             # 回合已作废（被打断/被新句取代）
             if self._agent_error:
                 err = self._agent_error
@@ -544,6 +820,9 @@ class DialogueController:
                 self._assistant_buf = ""
                 self._assistant_full = ""
                 self._assistant_display = ""
+                self._agent_tts_buf = ""
+                self._agent_tts_played = ""
+                dbg("STREAM_THREAD done gen=%d" % gen)
                 if self._mood_marker and self._mood is None:
                     self._mood = "平和"            # agent 没带标记 → 默认心态
                 self._user_turn = ""               # 本轮累计清空（不 commit 历史）
@@ -605,8 +884,8 @@ class DialogueController:
                 sentence = self._assistant_buf[:cut].strip()
                 self._assistant_buf = self._assistant_buf[cut:]
                 first = self._tts_job is None     # 本回合首句（尚无 TTS 任务在册）
-            if not any(ch.isalnum() for ch in sentence):
-                continue                          # 纯标点段（如"。。"/换行残留闭引号）丢弃后继续找
+            if not any(ch.isalnum() for ch in self._clean_for_tts(sentence)):
+                continue   # 纯标点段/纯心态标记段（如"。。"/"【心态：期待】"）丢弃后继续找
             if first and self._reply_hold > 0:
                 time.sleep(self._reply_hold)      # 锁外：给用户续句打断的机会
                 with self._lock:
@@ -645,6 +924,16 @@ class DialogueController:
             i = buf.find(ch, start_idx)
             if i >= 0 and (first < 0 or i < first):
                 first = i
+        # 1a) 心态标记闭合处（】/] 之后）也可作切点：模型常在句中切换心态
+        #     （"…哈【心态：开心】阿阳…"），不当切点会把前后句粘成一个 TTS Job
+        #     （合并气泡/超长句，live2d 逐句跟播失效）。标记本身随前句被 _MOOD_SUB
+        #     剥掉不念；闭合处在句末边界之前 → 优先按标记切。
+        m = self._MOOD_SUB.search(buf, start_idx)
+        if m is not None:
+            end = m.end()
+            if first < 0 or end <= first:
+                if len(buf[:end].strip()) >= 2:
+                    return self._absorb_closers(buf, end)
         if first >= 0 and len(buf[:first + 1].strip()) >= 2:
             return self._absorb_closers(buf, first + 1)
         # 1b) 无合格首边界 → 退回取最后一个边界（旧行为，防句中停顿被拆）

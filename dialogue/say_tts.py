@@ -27,6 +27,8 @@ voice0 无播放回调，Job 只暴露 done / wait / canceled 三信号；逐句
 import threading
 import time
 
+from .debug_log import _ON as _DBG_ON, dbg   # 临时：VOICE1_DEBUG_TTS=1 才落盘，定位后删
+
 
 class SayTTS:
     """voice0 RealtimeTTS 的 live2d 跟播代理。包一层后 `submit` 仍是原语义（返回真 Job），
@@ -51,6 +53,7 @@ class SayTTS:
         job = self._tts.submit(text)
         with self._lock:
             self._pending.append((job, text))
+            dbg("SAY.submit pend=%d %r" % (len(self._pending), text[:20]))
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(target=self._drive,
                                                 name="say-tts-watch", daemon=True)
@@ -67,14 +70,26 @@ class SayTTS:
         while True:
             with self._lock:
                 if not self._pending:
+                    dbg("SAY.drive exit")
                     return                # 无事可播 → 退出（下条 submit 重启新 worker）
                 job, text = self._pending[0]
                 if job.done:
                     self._pending.pop(0)  # 队首已播完/被取消 → 清掉看下一个
+                    dbg("SAY.skip done=%s canceled=%s %r" % (job.done, job.canceled, text[:20]))
                     continue
             # 队首未播 = 正在播或下一个要播 → 此刻发它文本（气泡跟上开播）
+            dbg("SAY.say %r" % text[:20])
             self._say_cb(text)
-            job.wait()                    # 阻塞到本句播完/被打断（voice0 永不悬挂）
+            if _DBG_ON:
+                # 带超时打点的 wait（仅调试）：卡死时能看到反复的 SAY.waiting 行
+                _evt = threading.Event()
+                threading.Thread(target=lambda: (job.wait(), _evt.set()), daemon=True).start()
+                _t0 = time.monotonic()
+                while not _evt.wait(2.0):
+                    dbg("SAY.waiting >%ds %r" % (int(time.monotonic() - _t0), text[:20]))
+            else:
+                job.wait()                    # 阻塞到本句播完/被打断（voice0 永不悬挂）
+            dbg("SAY.wait done=%s canceled=%s %r" % (job.done, job.canceled, text[:20]))
             with self._lock:
                 if self._pending and self._pending[0][0] is job:
                     self._pending.pop(0)
@@ -82,6 +97,7 @@ class SayTTS:
                 # 被打断（hard_stop）→ 作废代际的未播句文本全丢；新 submit 会重启 worker
                 with self._lock:
                     self._pending = [(j, t) for (j, t) in self._pending if not j.canceled]
+                    dbg("SAY.filter remain=%d" % len(self._pending))
                 continue
             # 本句正常播完 → 若链已空（队列排空），做一轮"真实播完"判断
             with self._lock:

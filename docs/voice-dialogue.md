@@ -81,7 +81,8 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 
 默认 `--brain llm` 用上面的 LLM 引擎（DeepSeek/llmx，**零改动**）。`--brain agent` 则把大脑
 换成**本地 claude code**（`claude-agent-sdk` 常驻会话）：说话 → ASR → 提交给 agent →
-取**最终结论** → TTS。中间的工具调用/思考文本不进 TTS。设计文档 `docs/agent-integration.md`。
+取**最终结论** → TTS。中间的工具调用/思考文本默认不进 TTS（`--agent-stream-tts` 可让流式
+增量也按句播报，见下）。设计文档 `docs/agent-integration.md`。
 
 **用法**（无需配 LLM key；首次需联网装 SDK，运行期常驻零冷启动）：
 
@@ -108,8 +109,73 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - **agent 能力**：`assistant/.mcp.json` + `assistant/skills/`（骨架已建，按需填 MCP 服务/技能）。
 - 本地会话存档（`sessions/*.json`）agent 模式**仍保留**（审计用，额外带 agent_session_id），
   与 claude 侧会话并存。
-- 控制台同样有流式出字（agent 模式从 partial 增量走，TTS 仍只取最终结论）与
-  `→ LLM 请求中…` / `× LLM 出错` 状态行。
+- 控制台同样有流式出字（agent 模式从 partial 增量走）与 `→ LLM 请求中…` / `× LLM 出错`
+  状态行。
+- **流式增量也送 TTS** `--agent-stream-tts`（默认关）：agent 只播最终结论意味着工具调用前
+  的过渡句/思考段（实测「我把未来七天的天气捋一遍给你哈」）只显示不播、出声前干等工具
+  7-8s；开此开关后 partial 也按句播报（心态标记跨 delta 未闭合不切句、句中心态标记也作
+  切点、无标点缓冲以句末语气词兜底切），**最终结论到达三态收尾**：结论整段已进流式队列 →
+  **不打断**自然播完（打断会把"已入队未开播"的结论音频全取消 → 完全静音，2026-09-13
+  实测）；已播全是结论前缀 → 不打断只补送剩余；已播含过渡句/思考段 → 立即打断 + 从
+  `_tail_overlap` 跳过已播开头重播（防"阿阳"整句播两遍）。**去重只对最后一个心态标记之后
+  的结论本体算**——ResultMessage 全文常以过渡句开头，对全文算会把过渡句误当已播结论跳过
+  打断。关=只播最终结论（旧行为零变化）。一键启动透传：
+  `start_dialogue.bat agent --agent-stream-tts`。
+- **结论重播回声自屏蔽** `--replay-echo-guard-ms`（默认 1500，仅 agent 结论含过渡句被切重播
+  的那一支设置）：重播刚起瞬间新 ASR 定稿句大概率是"被切音频的回声"——过渡句被
+  `tts.interrupt()` 切掉、尾音在房间里绕，回声门控的 grace 窗口又把回声喂进 ASR，VAD 闭成
+  一条幻影句落在 post-commit 窗口内 → 把重播也打断（2026-09-14 实测「金价卡在'给你'、气泡
+  冻在'最近两月…'」根因：GPU 上重播两句都在合成中，被打断后全部 stale 跳过 → 无音频 +
+  SayTTS 链空退出、气泡冻住）。此窗口内新定稿句丢弃（只拦定稿句，partial/采集不受影响），
+  窗口过后恢复正常。**与回声门控是两层不同窗口**：`--echo-guard` 拦"播放期间"的麦克风采集
+  （只喂 KWS），本参数拦"重播刚起"已被 ASR 闭成定稿句的漏网回声。排查"重播被吞/气泡冻结"
+  先看 `--replay-echo-guard-ms` 是否被意外调小，或 `VOICE1_DEBUG_TTS=1` 跑一遍看
+  `FEED DROP(echo guard)`。
+- **branch c 尾差打断 = 金价冻结真根因（2026-09-14，真实 debug 日志铁证
+  `sessions/debug_tts_20260914_175020.log`，无 CLI 开关）**：`--agent-stream-tts` 下 agent
+  流式吐完整结论 8 句（边吐边播，voice0 队列深：O1 刚开播、后面全在排队），最后一句
+  "…不构成投资建议哦"按语气词"哦"切出、句末"。"留在流式缓冲没切出来。ResultMessage 到达
+  （全文含尾"。"）→ `_tail_overlap(played, clean_full)` 返回 155/156（结论文本几乎全量已
+  入队，只差尾"。"）→ 旧逻辑 `skip<len_clean` 落 **branch c** → `tts.interrupt()` 把**已入队
+  未开播**的整条结论音频全取消，重播却只有 1 字"。"（`_find_cut` 吐不出 <2 字句、
+  `_submit_tts` 丢纯标点）→ 重播为空 → **彻底静音（"说了阿阳就卡住"）**。`played` 累计的是
+  **提交文本**、不是实际播放位置——队列深时它远超前于真实出声，branch c 据此打断就把正确
+  音频打掉。修法（`controller._on_agent_result`）：**残尾 ≤ `_TRIVIAL_TAIL`（6 字）→ 视为
+  已全量流式（branch a'）不打断**，让队列自然播完（残尾是纯标点/尾词，值不得打断；结论文本
+  与流式一致时打断 = 白白杀掉已入队正确音频）。真正的 branch c（过渡句被结论打断+重播）不受
+  影响——那是 `_tail_overlap` 返回小 skip 的场景。headless 验证 `tmp/probe_real_freeze.py`
+  （interrupt=0、被杀音频=0、结论 8 句全进队）。排查"说了 X 就卡住"用 `--debug-tts`（或
+  `VOICE1_DEBUG_TTS=1`；cmd 设不了环境变量所以给了命令行开关，定位后即删）看 `RESULT
+  branch=/interrupt=` 行：`branch=c interrupt=True` 但 `remainder` 只有 1-2 字 = 尾差打断。
+- **过渡句卡到结论才播 = 静默兜底切 + 换行对齐去重（2026-09-14 实测笑话场景，无 CLI 开关）**：
+  `--agent-stream-tts` 下用户实测"好，讲个新笑话给你"**早打印到控制台、音频却等最终结论才
+  播**（金价过渡句"我把近十年…覆盖）"无此问题）。两个叠加子问题：① **idle 切句缺失**——金价
+  过渡句后跟 `\n`（`_find_cut` 边界）能立即切；笑话过渡句以"你"结尾（非句末语气词哈/哦/吧、
+  无标点）**没有切点**，缓冲滞留整个工具调用期（实测 3.7s 干等，出声前工具都跑完了）。
+  修法：`_agent_stream_thread` 把 `evt.wait()` 改 0.5s 分片睡循环，静默 ≥
+  `_AGENT_IDLE_FLUSH_MS`（1.5s）且心态标记闭合 → 整段缓冲先送出声
+  （`_idle_flush_agent_stream_locked`，过渡句计入 `_agent_tts_played` 供结论去重，不会播
+  两遍）。② **`\n` 归一化**——流式切句在 `\n` **边界处切**（入队句子文本不含 `\n`），而
+  `clean_full` 保留 `\n` → 两侧字符错位 → `_tail_overlap` skip=0 → 结论明明已全量流式进队，
+  却误落 branch c 取消+整段重播。修法：`_on_agent_result` 比较/去重前 `replace("\n","")`
+  （`\n` 对 TTS 发音无影响，仅对齐用）。headless 验证 `tmp/probe_joke_transition.py`
+  （修后 submits=6、interrupts=0、canceled=0：过渡句 1.5s 内出声、结论 5 句自然播完）。
+  排查"过渡句打印了但不播"用 `--debug-tts` 看 `FLUSH idle`（静默兜底切已生效）与 `RESULT
+  branch=a`（换行对齐后结论全量覆盖，不打断）。
+- **AI 自播期 KWS「停下」自屏蔽（防御性，2026-09-14；真正冻结根因见上）**：回声自屏蔽只拦
+  ASR 定稿句，**拦不住 KWS 旁路**——回声门控播放期把 mic 喂给「停下」KWS（`ingest_kws_only`），
+  **AI 自己的音频会被 KWS 自触发**（机制真实存在，金价数字文本实测触发过）。守卫 =
+  `kws_guard_active()`（`_replay_kws_until` 截止），`_on_interrupt`（KWS「停下」回调）窗口内
+  `return` 跳过 `hard_stop`。守卫原来只在 branch c（重播窗口）设置，覆盖不到"流式首播/自然
+  播放窗口"——修法：`controller._submit_tts` agent-stream 模式**每次提交按估算播放时长
+  （`max(replay_echo_guard, len/5+3s)`）顺延守卫**；`_on_agent_result` 的 covered 分支再按
+  **整段结论时长**（len/5+3s）顺延覆盖自然播放（per-submit 只按单句估算，队列延迟会让它
+  在句子真正出声前过期，实测 45.6s 提交的守卫只到 55s、队列却播到 ~79s）。代价：agent 整段
+  回答期间真"停下"被抑制，等播完才生效（已听内容损失最小；文本输入"停下"走 `ctrl.hard_stop()`
+  不经 KWS，不受影响）。headless 验证 `tmp/probe_kws_streamed.py`（A=守卫命中不冻结/
+  B=无守卫冻结复现）。排查"自播被吞/气泡冻在首句"用 `--debug-tts` 看日志 `KWS_GUARD extend`
+  或 `KWS_GUARD natural` 出现（守卫覆盖对应窗口）而 `_on_interrupt` 的 `KWS 守卫忽略` 命中
+  （=误检被挡下）而非 `KWS 停下 → hard_stop`（=窗口外真命中）。定位后即删。
 
 ## assistant/ 目录（agent 大脑工作区，独立 git 子模块）
 

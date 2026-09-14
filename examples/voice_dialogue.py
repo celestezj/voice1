@@ -308,6 +308,11 @@ def main():
                     help="AI 开口后麦克风还听正常语音的时长 ms（默认 1200）：回声要 ~1.2s 才"
                          "传到麦克风，这段时间照常识别（抓你没说完的尾巴），过后只认「停下」"
                          "防 AI 自答回声。调大尾巴更易被抓但自答风险略增，宁小勿大")
+    ap.add_argument("--replay-echo-guard-ms", type=int, default=1500,
+                    help="agent 结论重播后丢弃新 ASR 定稿句的时长 ms（默认 1500）：过渡句被切"
+                         "后尾音回声会在重播刚起的窗口里被 ASR 闭成幻影句、落在 post-commit "
+                         "窗口内打断重播（实测金价卡'给你'根因）。此窗口内新定稿句视为自回声"
+                         "丢弃；过后恢复正常。0 关闭")
 
     ap.add_argument("--echo-gate", action=argparse.BooleanOptionalAction, default=True,
                     help="回声门控：TTS 播放期只喂\"停下\"KWS、不识别（默认开；"
@@ -373,6 +378,15 @@ def main():
                     help="agent 单回合看门狗超时（秒，默认 90）：超时仍无结果 → 中断该回合并报"
                          "“× LLM 出错：agent 超时”，不再无限挂起（曾实测 resumed 会话被中断"
                          "残留污染后静默 2-3 分钟无任何事件）")
+    ap.add_argument("--agent-stream-tts", action="store_true",
+                    help="agent 流式增量也送 TTS（默认关）：模型边生成边按句播报——含工具调用前"
+                         "的过渡句/思考段（实测「我把未来七天的天气捋一遍给你哈」只显示不播、"
+                         "出声前干等工具 7-8s 的体验问题）；**最终结论一到立即打断重播**。"
+                         "关=只播最终结论（旧行为，零变化）")
+    ap.add_argument("--debug-tts", action="store_true",
+                    help="agent 流式送 TTS 的提交/打断/代际/气泡推进序列落盘到 "
+                         "sessions/debug_tts_<ts>.log（排查重播被吞/气泡冻住；等价于 "
+                         "VOICE1_DEBUG_TTS=1，cmd 下设不了环境变量所以给命令行开关，定位后即删）")
     ap.add_argument("--no-mcp", action="store_true",
                     help="不挂任何 MCP（默认自动读 agent 目录/.mcp.json 全量启用）。"
                          "要只关某一个 MCP，直接改 .mcp.json 删掉那段即可，不必加参数")
@@ -400,6 +414,10 @@ def main():
                     help="文本输入端口（默认关=原程序零变化）：起本地 TCP 监听，"
                          "examples/text_input.py 连入逐行输入，与麦克风语音并存（调试输入源）")
     args = ap.parse_args()
+
+    if args.debug_tts:
+        from dialogue.debug_log import enable as _dbg_enable
+        _dbg_enable()      # 命令行开关开启 TTS 调试埋点（=VOICE1_DEBUG_TTS=1）
 
     # ---- vits 音色清单（--tts-list-voices）：打印后退出，不初始化引擎 ----
     if args.tts_list_voices:
@@ -440,8 +458,9 @@ def main():
             disable_mcp=args.no_mcp,
             debug=args.debug,
         )
-        print("[agent] 大脑=本地 claude 常驻会话（dir=%s%s）"
-              % (agent_dir, "，续上次会话" if args.agent_resume else "，新会话"),
+        print("[agent] 大脑=本地 claude 常驻会话（dir=%s%s%s）"
+              % (agent_dir, "，续上次会话" if args.agent_resume else "，新会话",
+                 "，流式增量也送 TTS（结论到达打断重播）" if args.agent_stream_tts else ""),
               flush=True)
     else:
         if args.system_prompt:
@@ -495,11 +514,12 @@ def main():
                               reply_hold=args.reply_hold,
                               merge_window=args.merge_window / 1000.0,
                               post_commit_window=args.post_commit_window / 1000.0,
+                              replay_echo_guard=args.replay_echo_guard_ms / 1000.0,
                               max_context_tokens=args.max_context_tokens,
                               mood_marker=args.mood_marker,
                               agent=agent)
     if agent is not None:
-        ctrl.set_agent(agent)     # 接管 agent 结果/流式回调（须在 agent.start() 前）
+        ctrl.set_agent(agent, stream_tts=args.agent_stream_tts)  # 接管结果/流式回调（agent.start() 前）
         agent.start()             # 冷启动连接 claude（阻塞到连上；之后常驻随时可问）
         print("[agent] 大脑就绪（session=%s，cwd=%s）"
               % (agent.session_id, agent.cwd), flush=True)
@@ -686,6 +706,14 @@ def main():
     asr.on_sentence(on_sentence)
     def _on_interrupt():
         # 用户说"停下"→ 立即终止 LLM+TTS；live2d 同步收说话框 + 表情复位（用户拍板）
+        from dialogue.debug_log import dbg
+        if ctrl.kws_guard_active():
+            # 结论重播窗口内：AI 自己的重播音频会被回声门控喂进"停下"KWS 自触发（金价
+            # 重播冻结实测根因——气泡冻在"阿阳"、后面无声）。重播是已听过的内容，
+            # 屏蔽这段时间的误检，真"停下"等重播播完照常生效（kws_guard_active 见 controller）。
+            dbg("KWS 重播守卫忽略（重播自播误检）")
+            return
+        dbg("KWS 停下 → hard_stop")
         ctrl.hard_stop()
         if live2d is not None:
             live2d.reset()
@@ -791,6 +819,8 @@ def main():
         busy = bool(args.echo_gate and ctrl.tts_busy)
         decision = wake.feed_decision(now, rms2, SPEECH_POW, ctrl.turn_active)
         if decision == "none":                     # 静默超时 → 已回休眠
+            from dialogue.debug_log import dbg
+            dbg("静默超时 → hard_stop")
             ctrl.hard_stop()                       # 清理在途 LLM/TTS（已 commit 历史保留）
             # 告别语是 feed_decision 内部 go_sleep 暂存的，必须取走播放——
             # 否则超时回休眠全程无声无提示，用户以为没休眠。

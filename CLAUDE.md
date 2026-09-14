@@ -165,6 +165,69 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   时 dump `[agent-cli]` 最近输出（不再全吞，诊断超时/报错可查）。④ `close()` 先直接 interrupt
   在途回合，**不留脏回合给下次 resume**（中断残留会污染下一轮 receive）——遇 agent 卡死/
   会话疑似被污染，删 `sessions/agent_session_id.txt` 换全新会话（病会话删除即弃）。
+  （⑤ **流式增量送 TTS** `--agent-stream-tts`，默认关：agent 只播最终结论意味着工具调用前
+  的过渡句/思考段（实测「我把未来七天的天气捋一遍给你哈」）只显示不播、出声前干等工具
+  7-8s；开此开关后流式增量也按句送 TTS——心态标记跨 delta 未闭合不切句、句中心态标记也
+  作切点（"…哈【心态：开心】阿阳…"不粘成一句）、无标点缓冲以句末语气词（哈/哦/吧…）
+  兜底切（"我再确认一下…哈"这类过渡句工具调用期间能先出声）；最终结论到达**三态收尾**：
+  结论整段已进流式队列 → **不打断**自然播完（打断会把已入队未开播的结论音频全取消 →
+  完全静音，2026-09-13 实测）；已播全是结论前缀 → 不打断只补送剩余；已播含过渡句/思考段
+  → 立即 `tts.interrupt()` + 从 `_tail_overlap` 跳过已播开头重播（防"阿阳"整句播两遍）。
+  **去重重叠只对"最后一个心态标记之后"的结论本体算**——ResultMessage 全文常以过渡句开头，
+  对全文算会把过渡句误当已播结论跳过打断（2026-09-13 实测）。关=只播最终结论，旧行为零
+  变化。
+  ⑤b **过渡句静默兜底切 + 换行对齐去重（2026-09-14 实测笑话场景）**：① **idle 切句**——
+  工具调用期 agent 长时间无流式增量，缓冲里以"你"等非语气词结尾的过渡句（"好，讲个新笑话
+  给你"）没有标点/语气词切点，会**干等 3.7s 到结论才出声**（金价过渡句后跟 `\n` 能立即切、
+  笑话这句卡死——差别就是有无边界符）。修法：`_agent_stream_thread` 把 `evt.wait()` 改成
+  0.5s 分片睡循环，静默 ≥ `_AGENT_IDLE_FLUSH_MS`(1.5s) 且心态标记闭合 → 整段缓冲先送出声
+  （`_idle_flush_agent_stream_locked`，过渡句计入 `_agent_tts_played` 供结论去重，不会播两
+  遍）。② **`\n` 归一化**——流式切句在 `\n` **边界处切**（句子文本不含 `\n`），而
+  `clean_full` 保留 `\n` → 两侧字符错位 → `_tail_overlap` skip=0 → 结论明明全量流式却误落
+  branch c 取消+整段重播。修法：`_on_agent_result` 比较/去重前 `replace("\n","")`（`\n` 对
+  TTS 发音无影响）。两个问题叠加就是"笑话过渡句打印了但音频等结论才播"（probe_joke_
+  transition.py 复现，修后 submits=6 interrupts=0：过渡句 1.5s 内出声、结论自然播完）。
+  ⑥ **结论重播回声自屏蔽** `--replay-echo-guard-ms`（默认 1500）：**结论重播启动后短窗口内
+  丢弃新 ASR 定稿句**——被 `tts.interrupt()` 切掉的过渡句尾音此刻还在房间里绕，重播刚起、
+  门控 grace 又把回声喂进 ASR，VAD 闭成一条**幻影句**落在 post-commit 窗口内 → 把重播也打断
+  （2026-09-14 实测「金价卡在'给你'、live2d 气泡冻在'最近两月…'」根因：GPU 上重播两句都在
+  合成中，被打断后全部 stale 跳过 → 无音频 + SayTTS 链空退出气泡冻住）。只拦定稿句、不碰
+  partial，窗口过后恢复正常；agent 结论三态收尾里只有"含过渡句→打断重播"那一支才设置。
+  同款门控在 mic 采集层还有回声门控（`--echo-guard`，播放期只听"停下"），两层是不同窗口：
+  回声门控拦"播放期间"的麦克风采集，本自屏蔽拦"重播刚起瞬间"已被 ASR 闭成的定稿句。）
+  ⑦ **AI 自播期 KWS「停下」自屏蔽（防御性，2026-09-14；真正冻结根因见 ⑧）**：
+  `--replay-echo-guard-ms` 只拦 ASR 定稿句，**拦不住 KWS 旁路**——回声门控播放期把 mic
+  喂给「停下」KWS（`ingest_kws_only`），**AI 自己的音频会被 KWS 自触发**（机制真实存在，
+  金价数字文本实测触发过）。守卫 = `kws_guard_active()`（`_replay_kws_until` 截止），命中
+  `_on_interrupt` 里 `return` 跳过 `hard_stop`。**守卫原来只在 branch c（ResultMessage
+  处理=重播窗口）设置，覆盖不到"流式首播/自然播放窗口"**：`--agent-stream-tts` 下 agent
+  先流式吐过渡句→结论（边吐边播），ResultMessage 可能延迟（agent.py 实测"文本早到、结果
+  晚 35s"），流式 O1 已在结果到达前开播。修法（`controller._submit_tts` + `_on_agent_result`
+  的 covered 分支）：agent-stream 模式**每次提交 TTS 按估算播放时长（max(replay_echo_guard,
+  len/5+3s)）顺延守卫**覆盖流式窗口；结论收尾（branch a/a'，结论已入队不打断）再按**整段
+  结论时长**（len/5+3s）顺延覆盖自然播放——per-submit 只按单句估算，队列延迟会让它**在句
+  子真正出声前过期**（实测 45.6s 提交的守卫只到 55s，队列却播到 ~79s）。代价：agent 整段
+  回答期间真"停下"被抑制，等播完才生效（已听内容损失最小；文本输入"停下"走 `ctrl.hard_stop()`
+  不经 KWS，不受影响）。headless 验证 `tmp/probe_kws_streamed.py`（A=守卫命中不冻结/
+  B=无守卫冻结复现）。排查"自播被吞/气泡冻在首句"用 `--debug-tts` 看日志 `KWS_GUARD extend`
+  / `KWS_GUARD natural` 出现（守卫覆盖对应窗口）而 `_on_interrupt` 的 `KWS 守卫忽略` 命中。
+  ⑧ **branch c 尾差打断 = 金价冻结真根因（2026-09-14，真实 debug 日志铁证
+  `sessions/debug_tts_20260914_175020.log`）**：`--agent-stream-tts` 下 agent 流式吐完整
+  结论 8 句（边吐边播，voice0 队列深：O1 刚开播、后面全在排队），最后一句"…不构成投资
+  建议哦"按语气词"哦"切出、句末"。"留在流式缓冲没切出来。ResultMessage 到达（全文含尾
+  "。"）→ `_tail_overlap(played, clean_full)` 返回 155/156（结论文本几乎全量已入队，只差
+  尾"。"）→ 旧逻辑 `skip<len_clean` 落 **branch c** → `tts.interrupt()` 把**已入队未开播**
+  的整条结论音频全取消，重播却只有 1 字"。"（`_find_cut` 吐不出 <2 字句、`_submit_tts` 丢
+  纯标点）→ 重播为空 → **彻底静音（"说了阿阳就卡住"）**。`played` 累计的是**提交文本**，
+  不是实际播放位置——队列深时它远超前于真实出声，branch c 据此打断就把正确音频打掉。
+  修法（`controller._on_agent_result`）：**残尾 ≤ `_TRIVIAL_TAIL`（6 字）→ 视为已全量流式
+  （branch a'），不打断**，让队列自然播完（残尾是纯标点/尾词，值不得为它打断；结论文本与
+  流式一致时打断 = 白白杀掉已入队正确音频）。真正的 branch c（过渡句被结论打断+重播）不受
+  影响——那是 `_tail_overlap` 返回小 skip 的场景（结论头与流式尾不重叠）。headless 验证
+  `tmp/probe_real_freeze.py`（interrupt=0、被杀音频=0、结论 8 句全进队）。**排查"说了 X 就
+  卡住"先用 `--debug-tts` 看 `RESULT branch=/interrupt=` 行**：`branch=c interrupt=True` 但
+  `remainder` 只有 1-2 字 = 尾差打断（⑧）；`branch=a interrupt=False` 却仍冻结 = 另有其因
+  （KWS 自触发 ⑦，看 `KWS_GUARD natural` 是否覆盖）。
 - **本地会话存档（默认开，仅 LLM 模式）**：`--history-dump` / `--history-dump-dir`（默认
   `sessions/`，已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把
   `ctrl.snapshot()` 的**完整对话状态**（system+summary+history+进行中内容）原子覆盖写到
