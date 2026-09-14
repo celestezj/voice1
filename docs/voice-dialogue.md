@@ -164,6 +164,25 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
   （修后 submits=6、interrupts=0、canceled=0：过渡句 1.5s 内出声、结论 5 句自然播完）。
   排查"过渡句打印了但不播"用 `--debug-tts` 看 `FLUSH idle`（静默兜底切已生效）与 `RESULT
   branch=a`（换行对齐后结论全量覆盖，不打断）。
+- **结论全量流式仍整段重播 = LCS 占比判全覆盖（2026-09-14 鬼故事实测「好啊阿阳说两遍」）**：
+  ResultMessage 全文含过渡句前缀（agent 只在开头带一次心态标记 → `concl_start` 掐不到过渡句），
+  而过渡句+整篇都已在 played **开头**——`_tail_overlap` 只比 played **尾部**（重叠在 played
+  开头就匹配不上）→ skip=0 → branch c interrupt + 整段重播"好啊阿阳"两遍（日志
+  `sessions/debug_tts_20260914_201640.log` RESULT ctx=14 skip=0 branch=c，随后重播行重发同句）。
+  修法（`controller._on_agent_result`）：新增 `_overlap_ratio(a,b)`（**最长公共子序列占比**，
+  一维滚动 DP，O(n·m) 每回合一次可忽略）——内容保序、**容忍流式切句/丢标点的中段错位**（同一
+  份文本中段 particle 切句吞句号、`。」` 独立段被丢，played 与 clean_full 错位仍 ~0.7）。
+  ≥0.6 → 视为已全量播过，`skip=len(clean)` 落 branch a' 不打断不重播；<0.6 才
+  `max(_tail_overlap, _lcp)` 求补送起点（只流式了结论开头一点 = 真没播完要补送）。**`_tail_overlap`
+  只查 played 尾部是旧设计盲区：全量流式时重叠在 played 开头，必须补查 LCP/LCS 这类"前缀/任意
+  位置"判据。** headless 验证 `tmp/probe_ghost_overlap.py`（interrupts=0、"好啊阿阳"只 submit
+  一次、连续标点已塌缩）。排查"同一句话播两遍"用 `--debug-tts` 看 `RESULT branch=/interrupt=`：
+  `branch=c interrupt=True` 但 `played` 与 `clean_full` 内容几乎相同（LCS 高）= 全量流式误重播。
+- **连续相同标点禁止送 TTS（2026-09-14 用户实测鬼故事"过去……"合成怪声）**：`_clean_for_tts`
+  里 `_PUNCT_RUN_RE` `([。！？…～、；：，,—])\1+` → 单字符，把连续相同标点（`……`、`。。`、
+  `——` 等）塌缩——TTS 念重复标点不稳、无朗读意义。**只影响送 TTS 的文本，控制台/历史/存档
+  保留原文**（显示仍是 `过去……`，朗读是 `过去…`）。排查"TTS 怪声"先看送 TTS 文本有没有连续
+  标点；写新"送 TTS"路径记得过 `_clean_for_tts`（心态剥除/括号/连续标点一次到位）。
 - **AI 自播期 KWS「停下」自屏蔽（防御性，2026-09-14；真正冻结根因见上）**：回声自屏蔽只拦
   ASR 定稿句，**拦不住 KWS 旁路**——回声门控播放期把 mic 喂给「停下」KWS（`ingest_kws_only`），
   **AI 自己的音频会被 KWS 自触发**（机制真实存在，金价数字文本实测触发过）。守卫 =

@@ -214,6 +214,23 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   probe_llm_mood_two_rounds（两轮首句都带标记）/ probe_joke_transition（announced 首句带标记、
   无重复）。**写新"切句+显示"路径记得：跨调用累计用实例属性、所有出口走 `_with_pending_mood`、
   别用函数局部变量。**
+  ⑤e **结论全量流式重播 = LCS 占比判全覆盖（2026-09-14 鬼故事实测「好啊阿阳说两遍」）**：
+  ResultMessage 全文含过渡句前缀（agent 只在开头带一次心态标记 → `concl_start` 掐不到过渡句），
+  而过渡句+整篇都已在 played **开头**——`_tail_overlap` 只比 played **尾部**，匹配不上 → skip=0
+  → branch c interrupt + 整段重播"好啊阿阳"两遍（日志 `debug_tts_20260914_201640.log`
+  RESULT ctx=14 skip=0 branch=c，随后重播行重发同句）。修法：新增 `_overlap_ratio(a,b)`
+  （最长公共子序列占比，一维滚动 DP，O(n·m) 每回合一次可忽略）——**内容保序、容忍流式切句/
+  丢标点的中段错位**（同份文本中段 particle 切句吞句号、`。」` 独立段被丢，played 与 clean_full
+  错位仍 ~0.7）。≥0.6 → 视为已全量播过，`skip=len(clean)` 落 branch a' 不打断不重播；
+  <0.6 才 `max(_tail_overlap, _lcp)` 求补送起点（只流式了结论开头一点 = 真没播完要补送）。
+  **`_tail_overlap` 只查 played 尾部是旧设计盲区：全量流式时重叠在 played 开头，必须补查 LCP /
+  LCS 这类"前缀/任意位置"判据。** headless 验证 `tmp/probe_ghost_overlap.py`（interrupts=0、
+  "好啊阿阳"只 submit 一次、连续标点已塌缩）。
+  ⑤f **连续相同标点禁止送 TTS（2026-09-14 用户实测鬼故事"过去……"合成怪声）**：`_PUNCT_RUN_RE`
+  `([。！？…～、；：，,—])\1+` → 单字符，在 `_clean_for_tts` 里统一塌缩（TTS 念重复标点不稳、
+  无朗读意义）——**只影响送 TTS 的文本，控制台/历史/存档保留原文**。排查"TTS 怪声"先看送
+  TTS 的文本有没有连续标点；写新"送 TTS"路径记得过 `_clean_for_tts`（心态剥除/括号/连续标点
+  一次到位）。
   ⑥ **结论重播回声自屏蔽** `--replay-echo-guard-ms`（默认 1500）：**结论重播启动后短窗口内
   丢弃新 ASR 定稿句**——被 `tts.interrupt()` 切掉的过渡句尾音此刻还在房间里绕，重播刚起、
   门控 grace 又把回声喂进 ASR，VAD 闭成一条**幻影句**落在 post-commit 窗口内 → 把重播也打断

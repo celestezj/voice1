@@ -56,6 +56,9 @@ class DialogueController:
     # 右引号/右括号/闭书名号：句末边界（？！。…\n）之后紧随的闭符并入前一句——否则
     # 换行切句会把 `"》》` 这类纯标点残留切成独立 Job，TTS 合成标点怪声（实测苏联笑话标题）。
     _CLOSERS = frozenset("”’\"'》」』】）〕〉")
+    # 连续相同的句末/停顿标点 → 只留一个：`……`（鬼故事实测送 TTS 合成怪声）、`。。`、
+    # `——` 等重复标点没有朗读意义，TTS 前端念重复标点不稳（2026-09-14 用户实测）。
+    _PUNCT_RUN_RE = re.compile(r"([。！？…～、；：，,—])\1+")
 
     # 心态标记：LLM 回复开头带【心态：xxx】（user_prompt.txt 约定），代表表情、不念出来。
     # 支持【】与 [] 两种括号；_MOOD_RE 取首个心态（on_mood 回调），_MOOD_SUB 只在送 TTS 时
@@ -260,6 +263,8 @@ class DialogueController:
         if self._mood_marker:                          # 心态标记【心态：xxx】只在送 TTS 时剥掉不读
             sentence = self._MOOD_SUB.sub("", sentence)
         sentence = self._BRACKET_RE.sub("", sentence)  # 剥括号：`？》】`→`？`、`《…`→`…`（TTS 不念括号）
+        sentence = self._PUNCT_RUN_RE.sub(r"\1", sentence)  # 连续相同标点（……、——等）留一个：
+                                                       # 念重复标点合成怪声（鬼故事"过去……"实测）
         return sentence
 
     @staticmethod
@@ -277,6 +282,40 @@ class DialogueController:
             if played.endswith(result[:i]):
                 return i
         return 0
+
+    @staticmethod
+    def _lcp(a, b):
+        """a 与 b 的最长公共前缀长度。"""
+        n = min(len(a), len(b))
+        i = 0
+        while i < n and a[i] == b[i]:
+            i += 1
+        return i
+
+    @staticmethod
+    def _overlap_ratio(a, b):
+        """b 的内容有多少已在 a 中出现过（最长公共子序列长度占比，保序、容忍错位）。
+
+        结论本体是否已基本被流式播过的判据：流式切句/丢标点让 `played` 与 `clean_full`
+        中段错位（鬼故事实测同段文本，particle 切句吞句号、`。」` 独立段被丢），
+        `_tail_overlap`（比 played 尾部）匹配不上 → skip=0 → branch c 整段重播
+        "好啊阿阳"两遍。LCS 不要求连续，几处错位不影响 → 比率高（≥0.6）= 已全量播过。
+        一维滚动 DP，O(n·m)，文本几百字，每回合一次可忽略。
+        """
+        n, m = len(a), len(b)
+        if n == 0 or m == 0:
+            return 0.0
+        prev = [0] * (m + 1)
+        for i in range(n):
+            cur = [0] * (m + 1)
+            ai = a[i]
+            for j in range(m):
+                if ai == b[j]:
+                    cur[j + 1] = prev[j] + 1
+                else:
+                    cur[j + 1] = prev[j + 1] if prev[j + 1] >= cur[j] else cur[j]
+            prev = cur
+        return prev[m] / m
 
     def _submit_tts(self, sentence):
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
@@ -748,7 +787,19 @@ class DialogueController:
                         # debug_tts_20260914_183135.log：skip=0 而实际 6 句已流式全进队）。
                         nclean = clean_full.replace("\n", "")
                         nplayed = played.replace("\n", "")
-                        skip = self._tail_overlap(nplayed, nclean)
+                        # 结论本体已基本被流式播过（LCS 占比 ≥0.6，容忍流式切句/丢标点的
+                        # 中段错位）→ 视为全量覆盖不打断不重播。根因（2026-09-14 鬼故事实测）：
+                        # ResultMessage 全文含过渡句前缀（agent 只在开头带一次心态标记 →
+                        # concl_start 掐不到过渡句），而过渡句+整篇都在 played **开头**——
+                        # `_tail_overlap` 只比 played 尾部匹配不上（skip=0）→ branch c
+                        # interrupt + 整段重播"好啊阿阳"两遍。LCS 保序容忍错位，比率高即
+                        # 内容几乎全在 played 里（同一份文本中段切句错位仍 ~0.7）。
+                        # 阈值 0.6：只流式了结论开头一点（<60%）不算——那是真没播完要补送。
+                        if self._overlap_ratio(nplayed, nclean) >= 0.6:
+                            skip = len(nclean)
+                        else:
+                            skip = max(self._tail_overlap(nplayed, nclean),
+                                       self._lcp(nplayed, nclean))
                         remainder = nclean[skip:] if skip < len(nclean) else ""
                         clean_full = nclean                # 后续用归一化版（remainder/长度/守卫）
                         # 四态（2026-09-13/14 实测教训：打断会把"已入队未开播"的结论音频
