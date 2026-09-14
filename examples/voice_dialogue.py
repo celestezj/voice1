@@ -183,9 +183,11 @@ class _Console:
         nt = self._fit("".join(reversed(text)), tail_max)
         return text[:nh] + ell + text[len(text) - nt:]
 
-    def _write_line(self, text):
+    def _write_line(self, text, clamp=True):
         """原地刷新当前行；新文本短于旧文本 → 补空格盖掉残留，再回卷列 0。
 
+        clamp=True（实时预览）超宽截断防折行刷屏；clamp=False（定稿行）完整显示
+        （可折行——定稿后下一次输出 _begin 会先换行，折行不影响后续刷新）。
         _last_len 按【显示列宽】记（CJK 2 列）：残留清除若按字符数，CJK 密集行
         的列宽差是字符差的 ~2 倍，补的空格不够 → 旧行尾部漏出来（实测
         "AI: …星期六。　　　　　　　休息放松一下。"——"休息放松一下"是上
@@ -193,8 +195,9 @@ class _Console:
         """
         # 行内 \r/\n 会撕破单行显示：agent 流式常带换行，多行文本反复重写=刷屏
         text = text.replace("\r", " ").replace("\n", " ")
-        # 超宽截断：单行永不折行（折行 → \r 回不到整行首 → 堆叠刷屏）
-        text = self._clamp(text, self._term_cols())
+        if clamp:
+            # 超宽截断：单行永不折行（折行 → \r 回不到整行首 → 堆叠刷屏）
+            text = self._clamp(text, self._term_cols())
         w = self._disp_w(text)
         prev = self._last_len
         sys.stdout.write("\r" + text)
@@ -207,13 +210,13 @@ class _Console:
     def update(self, kind, text):
         with self._lock:
             self._begin(kind)
-            self._write_line(text)
+            self._write_line(text, clamp=True)    # 实时预览：截断防折行刷屏
             self.dirty = True
 
     def finalize(self, kind, text):
         with self._lock:
             self._begin(kind)
-            self._write_line(text)
+            self._write_line(text, clamp=False)   # 定稿行：完整显示，无省略号（可折行）
             self.dirty = True
             self.final = True
 
@@ -599,6 +602,7 @@ def main():
     q_wall = [None]              # 本轮问题提交时刻（monotonic，算首答时差用）
     first_ai_ts = [None]         # 本轮首个 AI 文本（首 delta）的会话轴时刻；打印过即置 None
     ai_ts_printed = [False]      # 本轮是否已给首答打过时间（同轮后续句不重复打）
+    agent_stream_tts = args.agent_stream_tts   # 供 on_ai_delta/on_ai_sentence 闭包读（流式每句定稿）
 
     def _ai_answer_ts(now):
         """首答时刻（会话轴秒）——**锚在用户问题定稿时刻上**：
@@ -624,6 +628,12 @@ def main():
             # 用开口时刻而非定稿时刻——agent 文本到齐与送 TTS 之间可能有桥接延迟，
             # 定稿时刻会把这段延迟算进时间戳。
             first_ai_ts[0] = _ai_answer_ts(time.monotonic())
+        if agent_stream_tts:
+            # agent 流式：每句送 TTS 时已由 on_ai_sentence 定稿成独立完整行（含首句
+            # 时间戳），这里**不再用累计全文做原地预览**——否则屏幕会留下"过渡句+结论
+            # 拼一行、带省略号截断"的残留（用户实测 2026-09-14）。首 delta 仍须捕获
+            # 首答时刻（上面已设），供首句定稿打时间。
+            return
         con.update("ai", "AI: " + full)             # AI 流式：原地刷新（含【心态：xxx】标记）
 
     def on_ai_sentence(_s):

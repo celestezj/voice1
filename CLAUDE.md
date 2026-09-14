@@ -187,6 +187,16 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   branch c 取消+整段重播。修法：`_on_agent_result` 比较/去重前 `replace("\n","")`（`\n` 对
   TTS 发音无影响）。两个问题叠加就是"笑话过渡句打印了但音频等结论才播"（probe_joke_
   transition.py 复现，修后 submits=6 interrupts=0：过渡句 1.5s 内出声、结论自然播完）。
+  ⑤c **流式每句控制台定稿行（2026-09-14 用户实测）**：agent 流式句送 TTS 时只走
+  `on_ai_delta` 的**累计全文预览**（`con.update`），不触发 `on_ai_sentence` 定稿 → 屏幕
+  残留"过渡句+结论拼一行、带省略号截断"（`_clamp` head…tail），且首句无 `[ts]` 时间戳。
+  修法：agent 流式每句（`_flush_agent_stream_locked`/`_idle_flush_agent_stream_locked`
+  统一走 `_announce_agent_sentence`）submit 后也调 `_on_ai_sentence`——与 LLM 路径
+  `_emit_sentences` 一致，控制台每句一行完整定稿、首句带 `[ts]` 首答时刻；纯心态标记段
+  （剥净后无可念内容）不刷行。配套：agent 流式模式 `on_ai_delta` **跳过累计预览**
+  （每句已定稿，预览只造成拼行/省略号）；`_Console.finalize` 定稿行 `clamp=False` 完整
+  显示（可折行，无省略号），`update` 实时预览仍截断防折行刷屏。验证 probe_joke_transition
+  announced=6（过渡句+结论5句各定稿一行）。
   ⑥ **结论重播回声自屏蔽** `--replay-echo-guard-ms`（默认 1500）：**结论重播启动后短窗口内
   丢弃新 ASR 定稿句**——被 `tts.interrupt()` 切掉的过渡句尾音此刻还在房间里绕，重播刚起、
   门控 grace 又把回声喂进 ASR，VAD 闭成一条**幻影句**落在 post-commit 窗口内 → 把重播也打断

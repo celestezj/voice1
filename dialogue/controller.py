@@ -634,19 +634,30 @@ class DialogueController:
                 b = self._agent_tts_buf
                 if len(b) >= 4 and b[-1] in self._PARTICLES \
                         and not self._agent_mood_pending(b):
-                    sentence = b.strip()
                     self._agent_tts_buf = ""
-                    if any(ch.isalnum() for ch in sentence):
-                        dbg("FLUSH particle %r" % sentence[:20])
-                        self._submit_tts(sentence)
-                        self._agent_tts_played += self._clean_for_tts(sentence)
+                    dbg("FLUSH particle %r" % b.strip()[:20])
+                    self._announce_agent_sentence(b.strip())
                 return
             sentence = self._agent_tts_buf[:cut].strip()
             self._agent_tts_buf = self._agent_tts_buf[cut:]
-            if any(ch.isalnum() for ch in sentence):
-                dbg("FLUSH cut@%d %r" % (cut, sentence[:20]))
-                self._submit_tts(sentence)      # RLock 内重入 submit；非阻塞入队
-                self._agent_tts_played += self._clean_for_tts(sentence)  # 累计已播（去重用）
+            dbg("FLUSH cut@%d %r" % (cut, sentence[:20]))
+            self._announce_agent_sentence(sentence)
+
+    def _announce_agent_sentence(self, sentence):
+        """agent 流式切出的句子：送 TTS + 累计已播 + 通知控制台定稿行。
+
+        与 LLM 路径 `_emit_sentences` 的 on_ai_sentence 语义一致——控制台每句一行完整
+        文本（首句带 `[ts]` 首答时间，由主程序 on_ai_sentence 打印）。否则 agent 流式
+        句只走 on_ai_delta 的**累计全文预览**，屏幕会留下"过渡句+结论拼一行、带省略号
+        截断"的残留（用户实测 2026-09-14）。纯心态标记/纯标点段（剥净后无可念内容）
+        → 不送 TTS、不打控制台行（独立 `【心态：开心】` 不刷一行）。
+        """
+        if not any(ch.isalnum() for ch in self._clean_for_tts(sentence)):
+            return
+        self._submit_tts(sentence)
+        self._agent_tts_played += self._clean_for_tts(sentence)  # 累计已播（去重用）
+        if self._on_ai_sentence:
+            self._on_ai_sentence(sentence)
 
     def _idle_flush_agent_stream_locked(self):
         """agent 静默期流式缓冲兜底切句（仅 _agent_stream_tts 时调用）。调用方持锁。
@@ -665,11 +676,9 @@ class DialogueController:
             return                               # 还在活跃产出（agent 打字中），不打断节奏
         sentence = self._agent_tts_buf.strip()
         self._agent_tts_buf = ""
-        if any(ch.isalnum() for ch in sentence):
-            dbg("FLUSH idle %.2fs %r" % (time.monotonic() - self._agent_last_delta_ts,
-                                         sentence[:20]))
-            self._submit_tts(sentence)
-            self._agent_tts_played += self._clean_for_tts(sentence)  # 过渡句算"已播"，结论去重
+        dbg("FLUSH idle %.2fs %r" % (time.monotonic() - self._agent_last_delta_ts,
+                                     sentence[:20]))
+        self._announce_agent_sentence(sentence)   # 过渡句算"已播"，结论去重
 
     def _on_agent_result(self, ctx, text, is_error):
         """agent 最终结论回来（agent 循环线程）。ctx 作废（被打断/被取代）→ 只唤醒不碰状态。
