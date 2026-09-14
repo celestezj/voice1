@@ -355,10 +355,25 @@ class ClaudeAgentClient:
         asyncio.run_coroutine_threadsafe(self._pending.put(("query", text, ctx)), self._loop)
 
     def abort(self):
-        """中断当前回合（等价交互式 claude 的 ESC）。进程/会话存活，非阻塞。"""
-        if self._closed or self._pending is None:
+        """中断当前回合（等价交互式 claude 的 ESC）。进程/会话存活，非阻塞。
+
+        直接 `_client.interrupt()`（**不经 worker 队列**）：worker 在 `await self._inflight`
+        阻塞期间处理不了 ("abort",)，原队列式 abort 排不上队 → 在途 query 会**跑满整轮才
+        作废**（2026-09-14 实测 LLM 请求中喊"停下"4 次无效、回复慢 20s，结果 DISCARD）。
+        直接 ESC 让 CLI 回合干净收尾：`_do_query` 的 `_drain` 收到终结后正常返回（无
+        ResultMessage → 不回调），worker 随 `await self._inflight` 返回继续下一个 query。
+        与 close() 同款直接 interrupt（close 随后断开连接；此处保留会话，靠 drain 终结）。
+        """
+        if self._closed or self._loop is None or self._client is None:
             return
-        asyncio.run_coroutine_threadsafe(self._pending.put(("abort",)), self._loop)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._client.interrupt(), self._loop)
+            try:
+                fut.result(timeout=3)
+            except Exception:
+                pass      # 超时/异常都吞——interrupt 尽力而为（ESC 语义）
+        except Exception:
+            pass
 
     # ---------------- 循环内部：worker 串行化 ----------------
     async def _worker(self):

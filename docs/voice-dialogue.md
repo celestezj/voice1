@@ -98,6 +98,12 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - **「停下」= ESC**：经 KWS 旁路命中 → `agent.abort()`（等价交互式 claude 按 ESC），
   立即中断当前回合、**进程/会话/历史全存活**，**绝不杀进程换上下文**；「停下」本身不进
   agent 上下文。打断后下一句全新 query。
+  **abort() 直接 `_client.interrupt()` 不经 worker 队列（2026-09-14 实测）**：`_worker` 在
+  `await self._inflight` 阻塞期间处理不了队列里的 ("abort",)——旧队列式 abort 会让在途
+  query **跑满整轮才作废**（LLM 请求中喊"停下"不立即停 + 回复慢 20s，4× hard_stop 后
+  query 仍跑到 217s 才 DISCARD）。直接 ESC 让 CLI 回合干净收尾，`_drain` 正常返回（无
+  ResultMessage → 不回调），worker 随即处理下一 query。headless 验证
+  `tmp/test_agent_abort_inflight.py`。
 - **权限【询问】**：敏感操作（开灯/执行命令/写文件等）agent 会带 `【询问】` 标记先征求同意——
   标记照常播出去问（括号本身不念），你**口头回答后** agent 在同一上下文继续执行并汇报。
   v1 的权限边界 = `assistant/CLAUDE.md` 人格规则 + 权限模式/工具清单。
@@ -183,20 +189,20 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
   `——` 等）塌缩——TTS 念重复标点不稳、无朗读意义。**只影响送 TTS 的文本，控制台/历史/存档
   保留原文**（显示仍是 `过去……`，朗读是 `过去…`）。排查"TTS 怪声"先看送 TTS 文本有没有连续
   标点；写新"送 TTS"路径记得过 `_clean_for_tts`（心态剥除/括号/连续标点一次到位）。
-- **AI 自播期 KWS「停下」自屏蔽（防御性，2026-09-14；真正冻结根因见上）**：回声自屏蔽只拦
-  ASR 定稿句，**拦不住 KWS 旁路**——回声门控播放期把 mic 喂给「停下」KWS（`ingest_kws_only`），
-  **AI 自己的音频会被 KWS 自触发**（机制真实存在，金价数字文本实测触发过）。守卫 =
-  `kws_guard_active()`（`_replay_kws_until` 截止），`_on_interrupt`（KWS「停下」回调）窗口内
-  `return` 跳过 `hard_stop`。守卫原来只在 branch c（重播窗口）设置，覆盖不到"流式首播/自然
-  播放窗口"——修法：`controller._submit_tts` agent-stream 模式**每次提交按估算播放时长
-  （`max(replay_echo_guard, len/5+3s)`）顺延守卫**；`_on_agent_result` 的 covered 分支再按
-  **整段结论时长**（len/5+3s）顺延覆盖自然播放（per-submit 只按单句估算，队列延迟会让它
-  在句子真正出声前过期，实测 45.6s 提交的守卫只到 55s、队列却播到 ~79s）。代价：agent 整段
-  回答期间真"停下"被抑制，等播完才生效（已听内容损失最小；文本输入"停下"走 `ctrl.hard_stop()`
-  不经 KWS，不受影响）。headless 验证 `tmp/probe_kws_streamed.py`（A=守卫命中不冻结/
-  B=无守卫冻结复现）。排查"自播被吞/气泡冻在首句"用 `--debug-tts` 看日志 `KWS_GUARD extend`
-  或 `KWS_GUARD natural` 出现（守卫覆盖对应窗口）而 `_on_interrupt` 的 `KWS 守卫忽略` 命中
-  （=误检被挡下）而非 `KWS 停下 → hard_stop`（=窗口外真命中）。定位后即删。
+- **AI 自播期 KWS「停下」自屏蔽 —— 已停用（2026-09-14 用户实测回归推翻）**：原设计（防御
+  性）——回声门控播放期把 mic 喂给「停下」KWS（`ingest_kws_only`），怀疑 **AI 自己的音频会
+  被 KWS 自触发**，故 `kws_guard_active()`（`_replay_kws_until` 截止）让 `_on_interrupt` 在
+  窗口内跳过 `hard_stop`；agent-stream 模式每次提交 TTS 按估算播放时长
+  （`max(replay_echo_guard, len/5+3s)`）顺延守卫，结论收尾再按整段结论时长顺延，覆盖流式/
+  自然播放/重播全程。**实测推翻**（`sessions/debug_tts_20260914_222157.log`）：金价/鬼故事
+  播放期的守卫命中（6~7 次）**全是用户在重复说"停下"被吞**（间隔 2.5~12s，金价文本无
+  tíng xià 匹配音）——"播放期只听'停下'"的契约被打破（用户实测"说了好多次都没反应"）；
+  AI 音频自触发"停下"在**所有真实日志零实例**（金价冻结真根因是 branch c 尾差打断，见上）。
+  KWS 无法从声学区分"AI 回声"与"真·停下"。**停用 = 删 `_submit_tts` / covered / branch c 三处
+  `_replay_kws_until` 设定点，`kws_guard_active()` 恒 False**——真"停下"随时生效（流式/自然
+  播放/重播全程可打断）。若将来 AI 音频真自触发，**正解是 AEC 回声消除**（从 mic 信号减喇叭
+  参考），不是宽守卫。headless 验证 `tmp/probe_kws_stop_playback.py`（播放期"停下"→
+  hard_stop：gen+1、interrupt 杀在播音频、agent abort、问题保留历史）。
 
 ## assistant/ 目录（agent 大脑工作区，独立 git 子模块）
 
@@ -497,23 +503,25 @@ stateDiagram-v2
 - **已知边界**：就绪语播放的 ~1.5s 内（自播门控期）mic 只喂"停下"，此刻你开口会被忽略
   ——唤醒后稍等一下再说话；AI 回复播放期同理（半双工门控）。所以退出词只在 AI 沉默时可说。
 
-**唤醒词 vs 打断词：检测路径与灵敏度对比（2026-09-13 记录）**：
-两者用**同一款** sherpa 3.3M KWS，灵敏度一致（40cm / SNR+5dB 分水岭处都会漏检）——但
-**唤醒词已双路兜底、打断词仍单路**，漏检后果也不同（唤醒漏了只是"不醒"，打断漏了会把
-"停下"当普通句子提交 LLM，污染对话）。
+**唤醒词 vs 打断词：检测路径与灵敏度对比（2026-09-13 记录，09-14 打断词补齐双路兜底）**：
+两者用**同一款** sherpa 3.3M KWS，灵敏度一致（40cm / SNR+5dB 分水岭处都会漏检）——唤醒词
+和打断词**都已双路兜底**，漏检后果不同（唤醒漏了只是"不醒"，打断漏了会把"停下"当普通
+句子提交 LLM，污染对话）。
 
 | | 唤醒词「小爱小爱」 | 打断词「停下」 |
 |---|---|---|
 | 检测器 | 睡眠态 `wake_det`（sherpa 3.3M） | 引擎内 `_interrupt_detector`（同款 3.3M） |
 | 主路径 | KWS `feed()` → `_do_wake` | 块级 KWS 旁路（T12，`ingest`/`ingest_kws_only`）→ `interrupt()` |
-| 40cm 灵敏度 | **已双路兜底**：KWS 漏 → 睡眠态也喂 ASR → 定稿句/partial 含唤醒词 → 唤醒 | **仍单路**：KWS 漏 → 块入队 → 定稿 → `on_sentence` 提交 LLM |
-| 漏检后果 | 只是"不醒"，再说一次（无害） | 「停下」被当普通句子提交 LLM（污染对话） |
+| 40cm 灵敏度 | **已双路兜底**：KWS 漏 → 睡眠态也喂 ASR → 定稿句/partial 含唤醒词 → 唤醒 | **已双路兜底（2026-09-14）**：KWS 漏 → 定稿文本含词兜底（`engine.py` `_process_sentence_locked`）→ 按打断处理吞掉，不进 LLM |
+| 漏检后果 | 只是"不醒"，再说一次（无害） | 「停下」被当普通句子提交 LLM（污染对话）——文本兜底挡住"KWS 漏但 ASR 听清"的大头，仅剩"KWS 漏 + ASR 也听歪"（声学极限，无法可靠兜） |
 
-注意：打断词**实时流式路径只有块级 KWS 旁路这一道**——worker 流式分支没有
-`_interrupt_on_detect` 整句级兜底（那只在非流式整句路径 `engine.py` 用）。若要对齐唤醒词
-做对称兜底：`on_sentence` 对话态拦截含打断词的定稿句 → `hard_stop` + 吞掉不提交。权衡：
-延迟比 KWS 高（要等 VAD 静音尾定稿，~0.6-1s vs ~0.3s），且"请你停下脚步…"这类含字句子会
-误吞并误打断——需先评估误判面再动。
+打断词实时流式路径的兜底链（2026-09-14 补全）：① 块级 KWS `feed()`（主线程，低延迟 ~0.3s）
+→ ② worker VAD 断句后整句音频 `_interrupt_on_detect(sent)`（流式/整句路径都有）
+→ ③ **定稿文本含打断词**（`_process_sentence_locked`，新增，流式/整句共用同一落点）——
+最后一道兜住"KWS 漏检但 paraformer 仍听清'停下'"（paraformer 比 3.3M KWS 灵敏 ~10dB）。
+权衡：文本兜底要等 VAD 静音尾定稿（~0.6-1s vs KWS ~0.3s），"请你停下脚步…"这类含字句子
+会被吞并打断——与流式 KWS 按音频命中"停下"的行为一致（KWS 本就命中音频里的"停下"），
+属可接受语义。命中时控制台打 `已停下` 状态行（语音打断可见反馈）。
 
 ### 离远说话也能提交：MicAGC v2（噪声门控 + 增益上限 24x）
 

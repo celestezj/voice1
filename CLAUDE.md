@@ -165,6 +165,15 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   时 dump `[agent-cli]` 最近输出（不再全吞，诊断超时/报错可查）。④ `close()` 先直接 interrupt
   在途回合，**不留脏回合给下次 resume**（中断残留会污染下一轮 receive）——遇 agent 卡死/
   会话疑似被污染，删 `sessions/agent_session_id.txt` 换全新会话（病会话删除即弃）。
+  ④b **「停下」abort() 同款直接 interrupt（2026-09-14 实测）**：`_worker` 在
+  `await self._inflight` 阻塞期间**处理不了队列里的 ("abort",)**——旧队列式 abort 排不上队，
+  在途 query 会**跑满整轮才作废**（实测 LLM 请求中喊"停下"4 次无效、回复慢 20s、结果
+  DISCARD；224716 日志 4× hard_stop 后 query 仍跑到 217.563s）。修法：abort() 与 close()
+  同款**直接 `_client.interrupt()`**（`asyncio.run_coroutine_threadsafe`，3s 超时吞异常），
+  ESC 让 CLI 回合干净收尾——`_do_query` 的 `_drain` 收到终结后正常返回（无 ResultMessage
+  → 不回调），worker 随 `await self._inflight` 返回继续下一个 query，**会话保留不杀进程**。
+  headless 验证 `tmp/test_agent_abort_inflight.py`（A 复刻根因：队列式 abort 处理不到 →
+  B 直接 interrupt 立即收尾 → C 下一 query 0.02s 出结果）。
   （⑤ **流式增量送 TTS** `--agent-stream-tts`，默认关：agent 只播最终结论意味着工具调用前
   的过渡句/思考段（实测「我把未来七天的天气捋一遍给你哈」）只显示不播、出声前干等工具
   7-8s；开此开关后流式增量也按句送 TTS——心态标记跨 delta 未闭合不切句、句中心态标记也
@@ -239,22 +248,21 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   partial，窗口过后恢复正常；agent 结论三态收尾里只有"含过渡句→打断重播"那一支才设置。
   同款门控在 mic 采集层还有回声门控（`--echo-guard`，播放期只听"停下"），两层是不同窗口：
   回声门控拦"播放期间"的麦克风采集，本自屏蔽拦"重播刚起瞬间"已被 ASR 闭成的定稿句。）
-  ⑦ **AI 自播期 KWS「停下」自屏蔽（防御性，2026-09-14；真正冻结根因见 ⑧）**：
-  `--replay-echo-guard-ms` 只拦 ASR 定稿句，**拦不住 KWS 旁路**——回声门控播放期把 mic
-  喂给「停下」KWS（`ingest_kws_only`），**AI 自己的音频会被 KWS 自触发**（机制真实存在，
-  金价数字文本实测触发过）。守卫 = `kws_guard_active()`（`_replay_kws_until` 截止），命中
-  `_on_interrupt` 里 `return` 跳过 `hard_stop`。**守卫原来只在 branch c（ResultMessage
-  处理=重播窗口）设置，覆盖不到"流式首播/自然播放窗口"**：`--agent-stream-tts` 下 agent
-  先流式吐过渡句→结论（边吐边播），ResultMessage 可能延迟（agent.py 实测"文本早到、结果
-  晚 35s"），流式 O1 已在结果到达前开播。修法（`controller._submit_tts` + `_on_agent_result`
-  的 covered 分支）：agent-stream 模式**每次提交 TTS 按估算播放时长（max(replay_echo_guard,
-  len/5+3s)）顺延守卫**覆盖流式窗口；结论收尾（branch a/a'，结论已入队不打断）再按**整段
-  结论时长**（len/5+3s）顺延覆盖自然播放——per-submit 只按单句估算，队列延迟会让它**在句
-  子真正出声前过期**（实测 45.6s 提交的守卫只到 55s，队列却播到 ~79s）。代价：agent 整段
-  回答期间真"停下"被抑制，等播完才生效（已听内容损失最小；文本输入"停下"走 `ctrl.hard_stop()`
-  不经 KWS，不受影响）。headless 验证 `tmp/probe_kws_streamed.py`（A=守卫命中不冻结/
-  B=无守卫冻结复现）。排查"自播被吞/气泡冻在首句"用 `--debug-tts` 看日志 `KWS_GUARD extend`
-  / `KWS_GUARD natural` 出现（守卫覆盖对应窗口）而 `_on_interrupt` 的 `KWS 守卫忽略` 命中。
+  ⑦ **AI 自播期 KWS「停下」自屏蔽 —— 已停用（2026-09-14 用户实测回归推翻）**：
+  原设计（防御性）：`--replay-echo-guard-ms` 只拦 ASR 定稿句，**拦不住 KWS 旁路**——回声
+  门控播放期把 mic 喂给「停下」KWS（`ingest_kws_only`），当时怀疑 **AI 自己的音频会被 KWS
+  自触发**（守卫 = `kws_guard_active()`，`_on_interrupt` 命中 `return` 跳过 `hard_stop`；
+  agent-stream 模式每次提交 TTS 按估算播放时长顺延守卫覆盖流式/自然播放/重播全程）。
+  **实测推翻（`sessions/debug_tts_20260914_222157.log`）：金价/鬼故事播放期的守卫命中
+  （6~7 次）全是用户在重复说"停下"被吞**（间隔 2.5~12s，金价文本无 tíng xià 匹配音），
+  用户实测"说了好多次都没反应"——**"播放期只听'停下'"的文档契约被打破**；AI 音频自触发
+  "停下"在**所有真实日志零实例**（金价冻结真根因是 ⑧ branch c 尾差打断，非 KWS 自触发）。
+  KWS 无法从声学区分"AI 回声"与"真·停下"，任何按播放时长的宽守卫都会连真"停下"一起吞。
+  **停用 = 删 3 处 `_replay_kws_until` 设定点（_submit_tts / covered 分支 / branch c），
+  `kws_guard_active()` 恒 False**——真"停下"随时生效（流式/自然播放/重播全程可打断）。
+  若将来 AI 音频真自触发（phonetics 恰好匹配 tíng xià，概率极低），**正解是 AEC 回声消除**
+  （从 mic 信号减喇叭参考），不是宽守卫。headless 验证 `tmp/probe_kws_stop_playback.py`
+  （播放期"停下"→ hard_stop 触发：gen+1、interrupt 杀在播音频、agent abort、问题保留历史）。
   ⑧ **branch c 尾差打断 = 金价冻结真根因（2026-09-14，真实 debug 日志铁证
   `sessions/debug_tts_20260914_175020.log`）**：`--agent-stream-tts` 下 agent 流式吐完整
   结论 8 句（边吐边播，voice0 队列深：O1 刚开播、后面全在排队），最后一句"…不构成投资
@@ -271,7 +279,8 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `tmp/probe_real_freeze.py`（interrupt=0、被杀音频=0、结论 8 句全进队）。**排查"说了 X 就
   卡住"先用 `--debug-tts` 看 `RESULT branch=/interrupt=` 行**：`branch=c interrupt=True` 但
   `remainder` 只有 1-2 字 = 尾差打断（⑧）；`branch=a interrupt=False` 却仍冻结 = 另有其因
-  （KWS 自触发 ⑦，看 `KWS_GUARD natural` 是否覆盖）。
+  （KWS「停下」宽守卫已停用（⑦），不再有 `KWS_GUARD` 覆盖问题——自播冻结先查回声门控/
+  回音自触发，真因大概率是回声或 queue 时序，用 `--debug-tts` 看 `RESULT` 与 `SAY` 行）。
 - **本地会话存档（默认开，仅 LLM 模式）**：`--history-dump` / `--history-dump-dir`（默认
   `sessions/`，已 gitignore）/ `--history-dump-interval`（默认 300s）。每周期把
   `ctrl.snapshot()` 的**完整对话状态**（system+summary+history+进行中内容）原子覆盖写到
@@ -280,9 +289,12 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   claude 自己管理，只落 `sessions/agent_session_id.txt` 供 `--agent-resume` 续）。
 - **打断（barge-in）**：LLM 在途时来新 ASR 句 → `gen` 代际 +1 弃流（生成器 close 关连接），
   **重发本轮累计**（句1+句2…）；被作废的回复不 commit 历史。
-- **停用词"停下"**：`--interrupt-words`（默认"停下"）。KWS 旁路命中 → `interrupt()` →
-  `on_interrupt` 回调 → 控制器 `hard_stop()`：立即终止 LLM 流与 TTS 输出；**被打断的问题
-  保留进历史**，"停下"本身经 KWS 旁路吞掉、绝不进历史/LLM 输入。
+- **停用词"停下"**：`--interrupt-words`（默认"停下"）。**双路打断**（2026-09-14 补齐，
+  对齐唤醒词）：① 块级 KWS 旁路 `feed()` 命中 → `interrupt()`；② KWS 漏检但 ASR 定稿文本
+  含打断词 → 引擎 `_process_sentence_locked` 兜底（paraformer 比 3.3M KWS 灵敏 ~10dB），
+  同样 `interrupt()` 且**本句吞掉不进回调**。命中 → `on_interrupt` 回调 → 控制器
+  `hard_stop()`：立即终止 LLM 流与 TTS 输出；**被打断的问题保留进历史**，"停下"本身吞掉、
+  绝不进历史/LLM 输入。控制台打 `已停下` 状态行（语音打断可见反馈，2026-09-14）。
 - **休眠/唤醒/退出状态机**（`--wake-word` 默认"小爱小爱"，逗号多词）：启动默认休眠——
   **双路唤醒**（`dialogue/wake.py` `WakeSession` 两态）：① 唤醒词 KWS（sherpa 3.3M）
   逐块 `feed()` 近场低延迟命中；② **睡眠态也喂 ASR 流式**，`on_sentence` 定稿句含唤醒词
@@ -297,8 +309,10 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   超时告别语经 `wake.consume_farewell()` 由调用方播
   （feed_decision 内部 go_sleep 的返回传不回调用方）。历史跨休眠保留（同次运行不清空，重启
   才重建存档）。退出词仅 AI 沉默时可说（播放期只听"停下"）。**打断词与唤醒词同款 KWS
-  （3.3M）、40cm 同漏检风险，但打断词仍单路（只有块级 KWS 旁路，无 ASR 定稿兜底）**——
-  漏检后果比唤醒更糟（"停下"被当普通句子提交 LLM）。完整对比见
+  （3.3M）、40cm 同漏检风险；打断词已双路兜底（2026-09-14）**——块级 KWS 旁路 + 引擎
+  `_process_sentence_locked` 的**定稿文本含词兜底**（paraformer 比 3.3M KWS 灵敏 ~10dB，
+  远距 KWS 漏检但 ASR 仍听清"停下" → 按打断处理、本句吞掉不进回调）。KWS 漏检**且** ASR
+  也听歪（"停下"→"评相"实测）仍会当普通句子提交——属声学极限，无法可靠兜底。完整对比见
   `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」的对比表格。详见
   `docs/voice-dialogue.md`「休眠 / 唤醒 / 退出」。
 - **回声半双工门控（v1）**：TTS 播放期（`ctrl.tts_busy`）mic 只喂 `asr.ingest_kws_only()`

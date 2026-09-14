@@ -10,7 +10,9 @@
   流式 `feed()`**——每个音频块先过 KWS，命中打断词（如"停下"）→ `interrupt()`
   即时作废排队任务、触发块丢弃不识别（不等 VAD 断句，避免"打断词排队尾"悖论）；
   正在识别的任务无法中止（整句前向原子），完成后判 `stale=True` 不进普通回调。
-  另保留 VAD 断句后整句 `detect()` 兜底（流式 miss 的第二道防线）。
+  另保留 VAD 断句后整句 `detect()` 兜底（流式 miss 的第二道防线）**+ 定稿文本含词
+  兜底**（`_process_sentence_locked`，paraformer 比 3.3M KWS 灵敏 ~10dB，远距 KWS
+  漏检但 ASR 仍听清"停下"→ 按打断处理、本句吞掉不进回调）。
 - **流式逐帧输出（T13）**：`streaming=True` 时（后端须 `supports_streaming`，whisper
   不支持则降级）worker 对**未断句块**逐块 `recognize_stream` 出 `on_partial` 部分字
   （"边说边出字"）；**断句边界块**以 `is_final=True` flush 定稿完整句文本——尾字延迟
@@ -467,8 +469,21 @@ class RealtimeASR:
         else:
             text = preset_text
         text = self._correct(text)      # T16 热词纠错：所有后端/流式定稿/整句统一生效
-        t2 = SentenceResult.now()
         stale = (task_gen != self._gen)       # 识别期间被打断？
+        if not stale and text and self._interrupt_words \
+                and any(w in text for w in self._interrupt_words):
+            # 打断词 ASR 定稿兜底（2026-09-14）：打断词 KWS 是 3.3M 小模型，灵敏度比
+            # paraformer-large 低 ~10dB（实测 40cm SNR+5dB 分水岭），远距/低音量会漏检
+            # → "停下"被当普通句子定稿提交（用户实测听成"评相"污染 LLM/历史）。与唤醒词
+            # ASR 定稿兜底同款双路设计：块级 KWS 近场低延迟 + 本检查远场兜底，命中按打断
+            # 处理（interrupt 作废排队任务 + 本句吞掉不进回调）。文本含词即命中（"请停下
+            # 脚步"亦如此）——与流式 KWS 按音频命中"停下"的行为一致。已持 _state_lock
+            # (RLock 可重入) + _recog_lock（后端 reset 均为纯状态清，不抢锁，安全）。
+            self.interrupt()
+            if self._debug:
+                print("[asr] 打断词命中（定稿文本兜底）→ 排队任务已作废", flush=True)
+            return None
+        t2 = SentenceResult.now()
         a_start, a_end = s_ts - self._t0, e_ts - self._t0
         if recog_axis == "audio":
             # preset_dur：preset 路径的识别在调用方（_stream_finalize）已计时完成，

@@ -721,11 +721,16 @@ def main():
         # 用户说"停下"→ 立即终止 LLM+TTS；live2d 同步收说话框 + 表情复位（用户拍板）
         from dialogue.debug_log import dbg
         if ctrl.kws_guard_active():
-            # 结论重播窗口内：AI 自己的重播音频会被回声门控喂进"停下"KWS 自触发（金价
-            # 重播冻结实测根因——气泡冻在"阿阳"、后面无声）。重播是已听过的内容，
-            # 屏蔽这段时间的误检，真"停下"等重播播完照常生效（kws_guard_active 见 controller）。
+            # KWS「停下」宽守卫已停用（2026-09-14，kws_guard_active 恒 False）——真"停下"
+            # 随时生效（流式/自然播放/重播全程可打断）。保留检查点供将来按窄回声窗口门控复用。
             dbg("KWS 重播守卫忽略（重播自播误检）")
             return
+        if wake.just_woke() or wake.sleeping:
+            # 唤醒瞬间 _do_wake 的 asr.interrupt() 清场 / 休眠期误触发：非对话中用户"停下"，
+            # 不提示"已停下"（唤醒即见"已停下"很怪）。hard_stop 照跑（唤醒语义下空操作无害）。
+            dbg("非对话态 interrupt（唤醒清场/休眠误触发）→ 不提示")
+        else:
+            con.status("已停下")      # 可见反馈：语音打断不打 [ts] 行，没提示用户以为没生效
         dbg("KWS 停下 → hard_stop")
         ctrl.hard_stop()
         if live2d is not None:

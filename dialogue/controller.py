@@ -108,9 +108,8 @@ class DialogueController:
         self._replay_echo_guard = float(replay_echo_guard)  # 结论重播后的回声自屏蔽秒（0=关）
         self._replay_echo_guard_until = 0.0        # 回声自屏蔽截止（monotonic）：期间新 ASR 句
                                                    # 视为"被切音频的回声"丢弃——不打断重播
-        self._replay_kws_until = 0.0               # 重播期 KWS"停下"屏蔽截止（monotonic）：
-                                                   # 重播音频会被回声门控喂进"停下"KWS 自触发
-                                                   # 自杀（金价重播冻结实测根因），窗口内忽略 KWS
+        self._replay_kws_until = 0.0               # （已停用 2026-09-14：KWS"停下"宽守卫删除，
+                                                   #   保留字段仅防旧代码引用崩；见 kws_guard_active）
         self._tts_job = None         # 最近提交的 TTS Job（voice0 返回值，含 .done/.wait）
         self._tts_busy = False       # TTS 是否在播/待播（echo 门控依据）
         self._lock = threading.RLock()     # RLock：_llm_loop finally 在锁内 _submit_tts 会重入
@@ -325,21 +324,9 @@ class DialogueController:
         if not any(ch.isalnum() for ch in sentence):
             return      # 剥净后纯标点/纯标记（如独立 `。”`、`【心态：xxx】`）也不送
         dbg("TTS_SUBMIT text=%r" % sentence[:24])
-        if self._agent_stream_tts:
-            # agent 流式送 TTS：本次提交的音频是 **AI 自己的声音**——播放期会被回声门控
-            # 喂进"停下"KWS（ingest_kws_only）。**KWS 守卫原来只在 branch c（ResultMessage
-            # 处理时）设置，覆盖不到"流式首播窗口"**：ResultMessage 可能延迟（实测文本早到、
-            # 结果晚 35s），此时流式 O1 已先开播，AI 自己的"阿阳，从八百三十四块…"触发
-            # "停下"KWS → 守卫未设 → hard_stop → O1 被杀 + 结果 ctx 代际已变被 DISCARD →
-            # 重播不提交 → 彻底静音（金价冻结真根因，2026-09-14）。故每次流式/重播提交
-            # 都按**本次句的估算播放时长**顺延屏蔽窗口（宁多勿少——重播/自播是已听内容，
-            # 真"停下"等播完再生效损失最小；文本输入打"停下"走 hard_stop 不受此守卫影响）。
-            est = max(self._replay_echo_guard, len(sentence) / 5.0 + 3.0)
-            self._replay_kws_until = max(self._replay_kws_until,
-                                         time.monotonic() + est)
-            dbg("KWS_GUARD extend %.1fs len=%d until=%.1fs"
-                % (est, len(sentence),
-                   self._replay_kws_until - time.monotonic()))
+        # KWS「停下」宽守卫已于 2026-09-14 停用（见 kws_guard_active 注释）：原来按估算播放
+        # 时长顺延屏蔽"停下"，实测把用户真"停下"整段吞掉（222157 日志 6~7 次守卫命中全是
+        # 用户在重复说"停下"），真"停下"随时生效，播放期随时可打断。
         job = self._tts.submit(sentence)
         with self._lock:
             if self._turn_first_submit_ts is None:
@@ -378,15 +365,22 @@ class DialogueController:
         return self._replay_echo_guard > 0 and time.monotonic() < self._replay_echo_guard_until
 
     def kws_guard_active(self):
-        """结论重播期间（branch c 后按重播文本时长估算）**屏蔽"停下"KWS 硬停**。
+        """KWS「停下」自屏蔽 —— **已停用**（2026-09-14 用户实测回归，恒 False）。
 
-        重播是 AI 自己重读结论，播放期回声门控把 mic 喂给"停下"KWS 检测器（ingest_kws_only）
-        ——AI 自己的重播音频可能被 KWS 自触发（"阿阳，从八百三十四块…"实测把重播杀死、
-        气泡冻在"阿阳"、后面无声，2026-09-14 金价冻结根因；天气重播没事=文本不触发）。
-        窗口内真说"停下"也等重播播完才生效——重播内容是已听过的，损失最小。
-        只在 branch c（真打断重播）设置；正常播放期 KWS 照常可用。
+        原 ⑦ 设计：AI 自播/重播期回声门控把 mic 喂给"停下"KWS，AI 自己的音频可能自触发 →
+        hard_stop 自杀，故按估算播放时长（len/5+3s/句）屏蔽"停下"。实测推翻：
+        - `sessions/debug_tts_20260914_222157.log`：金价/鬼故事播放期的守卫命中（6~7 次）
+          **全是用户真在说"停下"**（间隔 2.5~12s 的重复尝试），全部被吞——用户实测
+          "说了好多次都没反应"。"播放期只听'停下'"的文档契约被打破。
+        - AI 音频自触发"停下"（需 phonetics 恰好匹配 tíng xià）在**所有真实日志零实例**；
+          2026-09-14 金价冻结真根因是 branch c 尾差打断（⑧），已修，非 KWS 自触发。
+        - KWS 无法从声学区分"AI 回声"与"真·停下"，任何按播放时长的宽守卫都会连真"停下"
+          一起吞。
+        停用后真"停下"随时生效（含流式播放/自然播放/重播全程）；若将来 AI 音频真自触发，
+        正解是 AEC 回声消除（从 mic 信号减掉喇叭参考），不是宽守卫。保留方法签名 + main 的
+        `_on_interrupt` 检查点，便于将来按 `replay_echo_guard` 窄回声窗口门控复用。
         """
-        return time.monotonic() < self._replay_kws_until
+        return False
 
     # ---------------- 历史压缩（事件驱动后台线程，不阻塞对话）----------------
     def _maybe_compress(self):
@@ -828,15 +822,7 @@ class DialogueController:
                              not covered and skip < len(played)))
                         if covered:
                             self._assistant_buf = ""      # 整段已进队/残尾可忽略 → 无需重播
-                            # 自然播放防御：结论整段已入队、队列深——per-submit 守卫按单句
-                            # 估算时长，队列延迟会让它**在句子真正出声前就过期**。AI 自己的
-                            # 音频被回声门控喂进"停下"KWS，出声即可能自触发（金价数字实测
-                            # 触发过）。故按**整段结论时长**顺延守卫，覆盖已入队未开播的整段
-                            # 自然播放；真"停下"等播完再生效（已听内容损失最小，⑦ 同款权衡）。
-                            est = len(clean_full) / 5.0 + 3.0
-                            self._replay_kws_until = max(self._replay_kws_until,
-                                                         time.monotonic() + est)
-                            dbg("KWS_GUARD natural %.1fs len=%d" % (est, len(clean_full)))
+                            # （KWS「停下」守卫已停用：自然播放期真"停下"随时生效）
                         else:
                             self._assistant_buf = remainder  # 补送/重播未播部分
                             if skip < len(played):
@@ -846,15 +832,7 @@ class DialogueController:
                                 # （实测冻结根因）。短窗口内丢弃新 ASR 句 = 自屏蔽。
                                 self._replay_echo_guard_until = \
                                     time.monotonic() + self._replay_echo_guard
-                                # KWS 自屏蔽：重播音频会被回声门控喂进"停下"KWS 自触发自杀
-                                # （金价重播冻结实测根因，2026-09-14）。按重播文本时长估算
-                                # 屏蔽窗口（宁多勿少——重播是已听过的内容，等播完损失最小）。
-                                replay_len = len(clean_full[skip:])
-                                self._replay_kws_until = \
-                                    time.monotonic() + max(self._replay_echo_guard,
-                                                           replay_len / 5.0 + 3.0)
-                                dbg("RESULT kws_guard=%.1fs replay_len=%d" %
-                                    (self._replay_kws_until - time.monotonic(), replay_len))
+                                # （KWS「停下」守卫已停用：重播期真"停下"也随时生效）
                     else:
                         self._assistant_buf = raw
                     if self._mood_marker:
