@@ -136,6 +136,17 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   barge-in/post-commit/历史/存档/live2d 全自动继承。实现 `dialogue/text_input.py`
   （TextInputServer + route_text_line，可 headless 测），客户端 `examples/text_input.py`，
   测试 `tmp/test_text_input.py`。详见 docs/voice-dialogue.md「文本输入源」。
+- **LLM 模式工具（可选）** `--tools all|名字列表`（默认关=旧行为零变化，仅 `--brain llm`
+  生效，agent 模式忽略走 claude 原生工具/MCP）：**XML 内联工具调用**（参照 Alife）——模型在
+  输出文本流里写 `<get_weather city="北京"/>` 自闭合标签，`dialogue/toolparse.py`
+  `ToolXmlParser` 字符级流式解析，标签闭合立即执行本地工具（工具包在**仓库根 `tool/`**：
+  `@tool` 装饰器 + 包内自动扫描，**新增工具=丢一个 py 文件零改码**）；结果回灌成
+  `[工具结果]` user 消息 → 第二轮流式出最终答案。**过渡句先出声**：LLM 路径 `_find_cut`
+  不在语气词切句，工具标签捕获瞬间须显式把累积缓冲送 TTS，否则工具执行期用户听不到声音。
+  参数 `--tools-max-rounds`（默认 3，防无限循环）/ `--tools-timeout`（覆盖默认超时）。
+  第一批工具：`get_time`（零网络）/ `get_weather`（复用 assistant/qweather 技能直接
+  HTTP 调，不走 MCP）。headless 测试 `tmp/test_llm_tools.py`。完整设计见
+  `docs/llm-tools.md`。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > `--llm-config` 指定文件 > 默认
   `config.local.json` > 环境变量 `DEEPSEEK_API_KEY`（`--llm-config` 可换整份配置）。
@@ -417,7 +428,12 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
                  say_tts.py（SayTTS：tts 代理，文本→说话框逐句链式跟播+一轮播完复位，纯逻辑可测）/
                  text_input.py（TextInputServer：--text-input-port 文本输入源 TCP server +
                    route_text_line 纯路由：休眠自动唤醒/打断词整行/唤醒词·退出词无效，可测）/
+                 toolparse.py（ToolXmlParser：--tools 的 XML 流式解析器，Alife 移植，
+                   feed→(clean,calls)，跨 delta 拆分/透明容器/实体/注释，可测）/
                  config.local.json（机密 API key，gitignored，绝不提交）
+tool/            LLM 模式工具包（--tools，docs/llm-tools.md）：base.py（Tool/@tool/超时守卫）+
+                 __init__.py（pkgutil 自动扫描，新增工具=丢一个 py 文件零改码）+
+                 time_tool.py（get_time 零网络）+ weather.py（get_weather 复用 qweather 技能）
 assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力；
                  独立 git 子模块（GitHub 私有仓库，凭据不入库），设计目标/目录结构见 docs/voice-dialogue.md「assistant/ 目录」节
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）
@@ -434,6 +450,7 @@ reports/         bench 报告（gitignored）
 - `docs/engine-guide.md` = **引擎使用与工作原理指南**（线程模型/API 逐参/SentenceResult 字段/wall 与 audio 轴/VAD 原理/后端对比/**§9 热词纠错（同音字）**）。
 - `docs/voice-dialogue.md` = **语音对话使用 + 架构**（快速开始含推荐 `--vad-tail 300`；自定义系统提示词 `--system-prompt`；会话历史存档 `--history-dump`；参数白话解释 vad-tail/post-commit-window/echo-guard/merge-window 的直觉、时间线、为什么 post-commit 是时间窗、校准表；mermaid 线程时序图 + 阻塞/非阻塞说明）。
 - `docs/agent-integration.md` = **本地 agent 接入设计（方案稿，随实现更新）**（`--brain llm|agent` 开关、常驻 claude 会话、agent 模式旁路历史/压缩/系统提示词、打断=ESC、权限【询问】交互、重启续会话、文件级改造清单、技术风险）。
+- `docs/llm-tools.md` = **LLM 模式工具调用设计（已实现，2026-09-16）**（`--tools` XML 内联方案：tool/ 注册表 / toolparse 解析器 / _llm_loop 多轮流 / 安全阀 / 首批工具 / 落点与验证）。
 - `docs/backend-guide.md` = **新增后端接入指南**（流式/非流式后端契约、三步接入清单、引擎消费语义、验收纪律，接 SenseVoice 等新模型时先读）。
 - `README.md`「引擎设计」（T6 后落地）= RealtimeASR 完整设计（一分钟上手）。
 - `docs/ai-project-methodology.md`（在 voice0 仓库） = 本项目沿用并沉淀的 **AI 项目全流程方法论**，可复用。

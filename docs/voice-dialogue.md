@@ -448,6 +448,38 @@ sequenceDiagram
 - **headless 测试**：`tmp/test_text_input.py`（gitignored）——`route_text_line` 路由纯逻辑
   + `TextInputServer` TCP 集成（多客户端连/断）。
 
+## LLM 模式工具调用（`--tools`，默认关，仅 `--brain llm` 生效）
+
+给 **DeepSeek 直连的 LLM 模式**补上工具调用能力，同时**保住它 0.5s 首 token 的速度**——
+不做 agent 编排，参照 Alife 用 **XML 内联工具调用**。完整设计见 `docs/llm-tools.md`。
+
+- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather` 按名加载）。
+  **默认关**：不传 `--tools` = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径，**旧行为
+  零变化**。`--brain agent` 下忽略并打印提示（agent 走 claude 原生工具/MCP，两套不混用）。
+- **工作原理**：系统提示词注入工具文档 → 模型在**输出文本流里直接写自闭合 XML 标签**
+  （`好的我来查一下<get_weather city="北京"/>`）→ `dialogue/toolparse.py` 字符级流式解析
+  （标签一闭合立即执行本地工具）→ 结果回灌成 `[工具结果]` user 消息 → **第二轮流式**出最终
+  答案。两轮感知代价≈0：每轮都是 0.5s 首 token 的纯流式，且第 1 轮**过渡句已送 TTS 出声**
+  （工具执行期用户听到"好的我来查一下"，等待被说话掩盖）。
+- **工具包在仓库根 `tool/`**（独立顶层包）：`tool/base.py`（`Tool` / `@tool` 装饰器 / 执行
+  超时守卫 + 结果截断）、`tool/__init__.py`（`pkgutil` 自动扫描包内模块，**新增工具 = 丢一个
+  py 文件零改码**）、`tool/time_tool.py`（`get_time` 零网络）、`tool/weather.py`
+  （`get_weather` 复用 assistant/qweather 技能直接 HTTP 调，不走 MCP 更轻）。
+- **参数**：
+  - `--tools-max-rounds <n>`（默认 3）：工具续轮上限，防无限循环。
+  - `--tools-timeout <秒>`：覆盖单工具默认执行超时（不传用自带，如 get_time=3s /
+    get_weather=15s）。
+- **安全阀**：工具执行在独立线程 + 超时守卫（防挂死拖住 LLM 流）；异常/超时/未知工具都回灌
+  `[工具错误: …]` 让模型优雅回应；结果按 `max_result` 截断防爆上下文。
+- **控制台诊断**：工具执行完成打独立状态行 `[工具] name → 耗时/结果`（`on_tool` 回调），
+  不占 AI 定稿行。
+- **与打断/存档/live2d 的关系**：续轮在 `_llm_loop` 内同一个 gen、同一条流线程——barge-in /
+  post-commit / 回声门控把"问题→工具→答案"整轮看作一轮，打断时在途工具续轮一并作废；
+  工具结果进 `_history`（`[工具结果]` user 消息），存档/压缩正常包含；心态标记/live2d 不动。
+- **headless 测试**：`tmp/test_llm_tools.py`（gitignored）——XML 解析器单元（跨 delta 拆分 /
+  成对标签 / 透明容器 / 实体 / 注释）/ 假 LLM 两轮流（过渡句先出声、历史顺序）/ 安全阀
+  （轮数上限 / 超时 / 异常 / 未知工具）/ 默认关零变化。
+
 ## 会话历史存档（本地记录，默认开）
 
 > **仅 LLM 模式**：`--brain agent` 时不写本地存档——历史/压缩在 claude 会话里由 claude 自己

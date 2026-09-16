@@ -416,6 +416,14 @@ def main():
     ap.add_argument("--text-input-port", type=int, default=None,
                     help="文本输入端口（默认关=原程序零变化）：起本地 TCP 监听，"
                          "examples/text_input.py 连入逐行输入，与麦克风语音并存（调试输入源）")
+    ap.add_argument("--tools", default=None, metavar="LIST",
+                    help="LLM 模式工具（仅 --brain llm 生效；agent 模式忽略）：all 或逗号分隔的"
+                         "名字列表（get_time,get_weather）。不传=关=旧行为零变化。"
+                         "详见 docs/llm-tools.md")
+    ap.add_argument("--tools-max-rounds", type=int, default=3,
+                    help="工具续轮上限（默认 3）：防工具无限循环")
+    ap.add_argument("--tools-timeout", type=float, default=None,
+                    help="工具执行超时秒（默认单工具自带，如 get_time=3s / get_weather=15s）")
     args = ap.parse_args()
 
     if args.debug_tts:
@@ -476,6 +484,24 @@ def main():
         print("LLM: %s / %s（key %s，读 %s，不提交 git）"
               % (llm._base_url, llm._model, masked, llm.config_path), flush=True)
 
+    # ---- LLM 模式工具（--tools，docs/llm-tools.md）：XML 内联调用，仅 --brain llm 生效 ----
+    tools = None
+    if args.tools:
+        if args.brain == "agent":
+            print("[tools] --tools 仅 --brain llm 生效；agent 模式忽略（走 claude 原生工具/MCP）",
+                  flush=True)
+        else:
+            from tool import load_tools      # tool/ 在仓库根（sys.path 已含 _PROJ）
+            tools = load_tools(args.tools, logger=lambda m: print("[tools] " + m, flush=True))
+            if tools:
+                print("[tools] 已加载：%s（最多 %d 轮/次，超时 %s）"
+                      % (", ".join(sorted(tools)), args.tools_max_rounds,
+                         ("%gs" % args.tools_timeout) if args.tools_timeout else "默认"),
+                      flush=True)
+            else:
+                print("[tools] 未加载到任何工具（--tools %s）——本次运行工具能力关闭"
+                      % args.tools, flush=True)
+
     # ---- 引擎 ----
     interrupt_words = [w.strip() for w in args.interrupt_words.split(",") if w.strip()] or None
     wake_words = [w.strip() for w in args.wake_word.split(",") if w.strip()] or None
@@ -520,7 +546,10 @@ def main():
                               replay_echo_guard=args.replay_echo_guard_ms / 1000.0,
                               max_context_tokens=args.max_context_tokens,
                               mood_marker=args.mood_marker,
-                              agent=agent)
+                              agent=agent,
+                              tools=tools,
+                              tools_max_rounds=args.tools_max_rounds,
+                              tools_timeout=args.tools_timeout)
     if agent is not None:
         ctrl.set_agent(agent, stream_tts=args.agent_stream_tts)  # 接管结果/流式回调（agent.start() 前）
         agent.start()             # 冷启动连接 claude（阻塞到连上；之后常驻随时可问）
@@ -671,6 +700,13 @@ def main():
         if live2d is not None:
             live2d.emit(mood)
 
+    def on_tool(name, attrs, text, dt, ok):
+        # 工具执行结果 → 控制台独立状态行（与 [门控]/[合并] 同款诊断；不占 AI 定稿行）
+        if ok:
+            con.status("[工具] %s → %.2fs\n    %s" % (name, dt, text[:120]))
+        else:
+            con.status("[工具] %s × 失败：%s" % (name, text[:120]))
+
     asr.on_partial(on_partial)
 
     def on_sentence(r):
@@ -739,7 +775,8 @@ def main():
     ctrl.register_callbacks(on_user=on_user, on_ai_delta=on_ai_delta,
                             on_ai_sentence=on_ai_sentence,
                             on_llm_start=on_llm_start, on_llm_error=on_llm_error,
-                            on_merge_rollback=on_merge_rollback, on_mood=on_mood)
+                            on_merge_rollback=on_merge_rollback, on_mood=on_mood,
+                            on_tool=on_tool)
     if live2d is not None:
         # 回休眠唯一汇聚点 go_sleep()（bye 在 on_sentence / timeout 在 feed_decision 内部）
         # → 复位「平和」：角色回休眠待机不该继续挂着"开心/生气"

@@ -23,6 +23,7 @@ import threading
 import time
 
 from .debug_log import dbg   # 临时：VOICE1_DEBUG_TTS=1 才落盘，定位后删
+from .toolparse import ToolXmlParser   # LLM 模式工具：XML 流式解析（--tools，docs/llm-tools.md）
 
 
 class DialogueController:
@@ -59,6 +60,9 @@ class DialogueController:
     # 连续相同的句末/停顿标点 → 只留一个：`……`（鬼故事实测送 TTS 合成怪声）、`。。`、
     # `——` 等重复标点没有朗读意义，TTS 前端念重复标点不稳（2026-09-14 用户实测）。
     _PUNCT_RUN_RE = re.compile(r"([。！？…～、；：，,—])\1+")
+    # 兜底剥尖括号段（`<…>`，长度≤64 防吞正文）：LLM 吐未知标签/残留标签时防止被 TTS 念出来。
+    # 已知工具标签已被 toolparse 剥掉，这里只兜底未知/半截标签（幂等，同 _PUNCT_RUN_RE 位置）。
+    _TAG_RE = re.compile(r"<[^<>]{1,64}>")
 
     # 心态标记：LLM 回复开头带【心态：xxx】（user_prompt.txt 约定），代表表情、不念出来。
     # 支持【】与 [] 两种括号；_MOOD_RE 取首个心态（on_mood 回调），_MOOD_SUB 只在送 TTS 时
@@ -73,7 +77,8 @@ class DialogueController:
     def __init__(self, llm, tts, *, system_prompt=None, max_history_messages=None,
                  reply_hold=0.0, merge_window=0.0, post_commit_window=0.0,
                  max_context_tokens=40000, recent_keep=6, headroom=4000,
-                 mood_marker=True, agent=None, replay_echo_guard=1.5):
+                 mood_marker=True, agent=None, replay_echo_guard=1.5,
+                 tools=None, tools_max_rounds=3, tools_timeout=None):
         # mood_marker=False → 本类的全部心态逻辑跳过（剥标记/解析/默认心态），
         # 行为与本次改动前完全一致；是否让 LLM 吐标记由 user_prompt.txt 里的约定决定。
         #
@@ -124,6 +129,14 @@ class DialogueController:
         self._mood_marker = bool(mood_marker)   # 心态标记总开关（False=全部跳过，行为同改动前）
         self._mood = None                # 当前回复解析出的心态（None=尚未解析到标记）
         self._on_mood = None             # 心态标记解析到（供上层显示/表情映射；正文里标记照常保留）
+        # LLM 模式工具（--tools，docs/llm-tools.md）：默认关。开时 _llm_loop 走多轮循环——
+        # 边流边解析 XML 标签→执行工具→结果回灌续轮（同一 gen/线程，barge-in 整轮作废）。
+        self._tools = None               # {name: Tool} 或 None（关）
+        self._tool_max_rounds = 3        # 工具续轮上限（防工具无限循环）
+        self._tool_parser = None         # ToolXmlParser 实例（tools 关 = None → 单轮原路径）
+        self._on_tool = None             # 工具执行完成回调（供控制台诊断行 [工具] …）
+        self._tool_results_inflight = [] # 本轮工具结果（commit 时插在 user 与 assistant 之间，
+                                         # 保证历史顺序：问题→[工具结果]→答复；硬停作废）
         # agent 模式专属状态（brain=agent 时使用）
         self._agent_evts = {}            # gen → Event（每回合一个，结果/作废唤醒对应收尾线程）
         self._agent_error = None         # 最近一次 agent 回合的错误文本（None=正常）
@@ -133,6 +146,7 @@ class DialogueController:
         # 出声前干等工具 7-8s 的体验问题）；最终结论一到立即 interrupt 打断重播。
         # 关 = 只播最终结论（旧行为，零变化）。
         self._agent_stream_tts = False   # 开关（set_agent 传入）
+        self.set_tools(tools, max_rounds=tools_max_rounds, timeout=tools_timeout)
         self._agent_tts_buf = ""         # 流式增量待切句缓冲（仅 _agent_stream_tts 时使用）
         self._agent_tts_played = ""      # 流式已 submit 的 TTS 文本累计（_clean_for_tts 后；
                                          # 最终结论重播时按尾部重叠跳过已播前缀，防"阿阳"播两遍）
@@ -142,11 +156,27 @@ class DialogueController:
                                          # 下一个真实句子的控制台显示上——否则标记只活在预览里、
                                          # 定稿行被覆盖后控制台看不到（LLM/agent 模式均 2026-09-14）
 
+    # ---------------- LLM 模式工具（--tools，docs/llm-tools.md）----------------
+    def set_tools(self, tools=None, *, max_rounds=3, timeout=None):
+        """启用/关闭 LLM 模式工具调用。tools: {name: Tool}，None/空 = 关（默认）。
+
+        默认关 = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径——旧行为零变化。
+        开启后：system 追加工具文档 → 模型在输出流里写 `<工具名 参数="值"/>` → 解析器
+        捕获 → 工具执行（锁外 + 超时守卫）→ 结果回灌续轮（上限 max_rounds）。
+        timeout: 非 None 时统一覆盖所有工具的 timeout 秒（`--tools-timeout`）。
+        """
+        self._tools = dict(tools) if tools else None
+        self._tool_max_rounds = max(1, int(max_rounds))
+        if timeout:
+            for t in (self._tools or {}).values():
+                t.timeout = float(timeout)
+        self._tool_parser = ToolXmlParser(self._tools.keys()) if self._tools else None
+
     # ---------------- 回调注册（供主程序/控制台接）----------------
     def register_callbacks(self, on_user=None, on_ai_delta=None,
                            on_ai_sentence=None, on_ai_done=None,
                            on_llm_start=None, on_llm_error=None,
-                           on_merge_rollback=None, on_mood=None):
+                           on_merge_rollback=None, on_mood=None, on_tool=None):
         self._on_user = on_user
         self._on_ai_delta = on_ai_delta
         self._on_ai_sentence = on_ai_sentence
@@ -155,6 +185,7 @@ class DialogueController:
         self._on_llm_error = on_llm_error
         self._on_merge_rollback = on_merge_rollback   # post-commit barge 撤答复（供控制台提示）
         self._on_mood = on_mood
+        self._on_tool = on_tool                       # 工具执行完成（供控制台 [工具] 诊断行）
 
     def set_agent(self, agent, *, stream_tts=False):
         """绑定 agent 客户端并接管其结果回调（agent 模式大脑）。须在 agent.start() 前调用。
@@ -216,9 +247,30 @@ class DialogueController:
         system = self._system
         if self._summary:
             system = system + "\n\n【此前对话摘要】\n" + self._summary
+        if self._tools:
+            system = system + "\n\n" + self._tools_prompt()
         return ([{"role": "system", "content": system}]
                 + list(self._history)
                 + [{"role": "user", "content": self._user_turn}])
+
+    def _tools_prompt(self):
+        """生成注入 system 的工具文档（docs/llm-tools.md §5.2，照 Alife UpdatePrompt 精简）。
+
+        调用方持锁（只读 self._tools）。system 永远放消息最前，工具文档拼在摘要之后。
+        """
+        lines = [
+            "## 工具调用",
+            "你可以通过输出 XML 标签调用工具来获取实时信息：",
+            "- 调用方式：<工具名 参数=\"值\"/>（自闭合）。可一次调用多个。",
+            "- 可用工具：",
+        ]
+        for t in sorted(self._tools.values(), key=lambda x: x.name):
+            lines.append("  " + t.to_prompt_doc())
+            if t.explanation:
+                lines.append("    " + t.explanation)
+        lines.append("- 调用前先说一句过渡语（用户听得到），然后输出标签，等收到 [工具结果] 后继续回答。")
+        lines.append("- 注意：& < > 等字符要用 &amp; &lt; &gt; 转义；标签本身不会被用户听到。")
+        return "\n".join(lines)
 
     # ---------------- "停下"硬停（ASR on_interrupt 回调，mic 线程）----------------
     def hard_stop(self):
@@ -242,6 +294,7 @@ class DialogueController:
             self._agent_tts_buf = ""       # agent 流式 TTS 缓冲作废
             self._agent_tts_played = ""    # 流式已播累计同样作废
             self._pending_mood_announce = ""
+            self._tool_results_inflight = []   # 在途工具结果作废（不 commit）
             self._stream_thread = None
             self._merge_deadline = None    # 有挂起的合并窗口 → 作废（"停下"不续发）
             self._tts.interrupt()          # 立即切音频 + 清队列（快操作）
@@ -264,6 +317,7 @@ class DialogueController:
         sentence = self._BRACKET_RE.sub("", sentence)  # 剥括号：`？》】`→`？`、`《…`→`…`（TTS 不念括号）
         sentence = self._PUNCT_RUN_RE.sub(r"\1", sentence)  # 连续相同标点（……、——等）留一个：
                                                        # 念重复标点合成怪声（鬼故事"过去……"实测）
+        sentence = self._TAG_RE.sub("", sentence)     # 兜底剥未知/残留 XML 标签（--tools 兜底）
         return sentence
 
     @staticmethod
@@ -506,6 +560,10 @@ class DialogueController:
         if self._history and self._history[-1]["role"] == "user":
             frag = self._history.pop()["content"]
             self._user_turn = frag
+        # 撤答复连带撤工具结果（顺序：问题 → [工具结果] → 答复）：残句+新句重发时不带旧工具结果
+        while (self._history and self._history[-1]["role"] == "user"
+               and self._history[-1]["content"].startswith("[工具结果]")):
+            self._history.pop()
 
     def _launch_llm(self):
         """把本轮累计发给 LLM（合并窗口过期 / 窗口=0 立即）。调用方不持锁。
@@ -580,20 +638,69 @@ class DialogueController:
         try:
             if self._on_llm_start:
                 self._on_llm_start()
-            for delta in self._llm.stream_chat(messages):
-                if gen != self._gen:          # 已被更新请求取代 → 弃流（生成器 close 关连接）
-                    return
+            parser = self._tool_parser               # tools 关 = None → 单轮原路径（零变化）
+            max_rounds = self._tool_max_rounds if self._tools else 1
+            round_no = 0
+            while True:
+                round_no += 1
+                if parser is not None:
+                    parser.reset()                   # 每轮全新生成，标签不跨轮
+                pending = []                         # 本轮捕获的工具结果（回灌文本）
+                for delta in self._llm.stream_chat(messages):
+                    if gen != self._gen:             # 已被更新请求取代 → 弃流（生成器 close 关连接）
+                        return
+                    if parser is not None:
+                        clean, calls = parser.feed(delta)   # 边流边解析（工具标签剥掉）
+                        delta = clean                # 正文（已剥标签）走原管线
+                    else:
+                        calls = ()
+                    with self._lock:
+                        if gen != self._gen:
+                            return
+                        self._assistant_buf += delta
+                        self._assistant_full += delta
+                        if self._mood_marker:
+                            self._parse_mood_locked()
+                        buf = self._assistant_buf
+                    if delta and self._on_ai_delta:  # 纯标签 delta（clean 空）不刷新预览
+                        self._on_ai_delta(delta, buf)
+                    self._emit_sentences(gen)
+                    if calls:
+                        # 工具调用前的过渡句先出声：_find_cut 只切句末标点，过渡句
+                        # （"好的我来查一下"）无边界会滞留到最终答案才播——工具执行期
+                        # 用户干等。此处把累积缓冲整段送出，TTS 开播后再跑工具。
+                        with self._lock:
+                            if gen != self._gen:
+                                return
+                            tail = self._assistant_buf.strip()
+                            self._assistant_buf = ""
+                        if tail:
+                            tail = self._with_pending_mood(tail)   # 拼回心态标记（TTS 剥掉不念）
+                            self._submit_tts(tail)
+                            if self._on_ai_sentence and any(ch.isalnum() for ch in tail):
+                                self._on_ai_sentence(tail)
+                        for c in calls:              # 工具执行在锁外（可能走网络，毫秒~超时）
+                            pending.append(self._run_tool(c))
+                if not pending:
+                    break                            # 没调工具 = 单轮 = 旧行为
+                msg = "[工具结果]\n" + "\n".join(pending)
+                if round_no >= max_rounds:
+                    # 到轮数上限：最后一批工具结果仍回灌进历史（工具已执行、侧效应已发生），
+                    # 但不再起新的 LLM 轮（防工具无限循环）。
+                    with self._lock:
+                        if gen != self._gen:
+                            return
+                        self._tool_results_inflight.append(msg)
+                    break
+                # 工具续轮：结果回灌为一条 user 消息，追加本地 messages 再流一轮。
+                # 不重新 _launch_llm——同一 gen、同一条流线程，barge-in/post-commit/回声门控
+                # 把整轮（含工具续轮）看作一轮，语义正确；工具结果暂存 inflight，
+                # commit 时插在 user 与 assistant 之间进 _history（供存档/压缩）。
                 with self._lock:
                     if gen != self._gen:
                         return
-                    self._assistant_buf += delta
-                    self._assistant_full += delta
-                    if self._mood_marker:
-                        self._parse_mood_locked()
-                    buf = self._assistant_buf
-                if self._on_ai_delta:
-                    self._on_ai_delta(delta, buf)
-                self._emit_sentences(gen)
+                    self._tool_results_inflight.append(msg)
+                messages.append({"role": "user", "content": msg})
             # 流正常结束 → 记录本次上下文的精确 token 用量（压缩触发依据）
             usage = getattr(self._llm, "last_usage", None)
             if isinstance(usage, dict) and usage.get("prompt_tokens"):
@@ -629,6 +736,31 @@ class DialogueController:
             if self._on_ai_done and full.strip():
                 self._on_ai_done(full)
             self._maybe_compress()
+
+    # ---------------- 工具执行（--tools，LLM 模式）----------------
+    def _run_tool(self, call):
+        """执行一个已捕获的工具调用，返回回灌给 LLM 的结果文本。
+
+        在 LLM 流线程、**锁外**调用（工具可能走网络）；`Tool.run()` 自带超时/异常/截断守卫，
+        绝不拖死语音流线程。诊断经 `on_tool` 回调（供主程序控制台打 `[工具] …含耗时`）。
+        """
+        name, attrs = call.name, call.attrs
+        tool = (self._tools or {}).get(name)
+        if tool is None:
+            return "调用 <%s> 失败：[未知工具 %s]" % (name, name)
+        t0 = time.time()
+        ok, text = tool.run(attrs)
+        dt = time.time() - t0
+        if self._on_tool:
+            try:
+                self._on_tool(name, attrs, text, dt, ok)
+            except Exception:
+                pass                             # 诊断回调失败不影响主链路
+        label = "<%s/>" % name if not attrs else "<%s %s/>" % (
+            name, " ".join('%s="%s"' % (k, v) for k, v in attrs.items()))
+        if not ok:
+            return "调用 %s 失败：%s" % (label, text)
+        return "%s 返回：%s" % (label, text)
 
     # ---------------- agent 模式（brain=agent，旁路历史/压缩/系统提示词）----------------
     def _on_agent_partial(self, ctx, delta):
@@ -912,6 +1044,10 @@ class DialogueController:
         """完整回复才进历史（被打断的回复 gen 不对，根本到不了这里）。调用方持锁。"""
         if self._user_turn:
             self._history.append({"role": "user", "content": self._user_turn})
+        # 工具结果插在 user 与 assistant 之间（顺序：问题→[工具结果]→答复）
+        for msg in self._tool_results_inflight:
+            self._history.append({"role": "user", "content": msg})
+        self._tool_results_inflight = []
         t = full_text.strip()    # 心态标记是模型真实输出，保留在历史/存档/上下文里
         if t:
             self._history.append({"role": "assistant", "content": t})
