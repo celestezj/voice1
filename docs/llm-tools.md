@@ -122,6 +122,9 @@ def get_weather(params: dict) -> str:
   - <get_time/> : 获取当前时间
 - 调用前先说一句过渡语（用户听得到），然后输出标签，等收到 [工具结果] 后继续回答。
 - 注意：& < > 等字符要用 &amp; &lt; &gt; 转义；标签本身不会被用户听到。
+- 补充（2026-09-16 实测补）：每轮对话都可以调用工具，且可以随时再次调用——用户追问新日期/
+  新城市等此前结果没覆盖的信息时，重新调用对应工具获取，不要用旧结果硬答、也不要说
+  "没有数据/查不到"。`get_weather` 默认取整周 7 天，用户追问后面几天不用重查就能答。
 ```
 
 ### 5.3 XML 流式解析器 —— `dialogue/toolparse.py`
@@ -175,7 +178,10 @@ def get_weather(params: dict) -> str:
 - 工具结果以 `{"role":"user","content":"[工具结果] ..."}` 进 `_history`（Alife 同款），
   存档/压缩正常包含。
 - 工具执行完成经 `on_tool(name, attrs, text, dt, ok)` 回调（主程序控制台打
-  `[工具] name → 耗时/结果` 诊断行，一眼可查；不占 AI 定稿行）。
+  `[工具] name 参数 耗时 X.XXs` 诊断行：**参数**（`city="北京"`，无参数显示「（无参数）」）
+  + **耗时**（工具实际执行秒数）+ 结果预览；预览限 120 字、**截断加省略号**
+  `…（预览截断，完整 N 字已送 LLM）`——真实 `max_result` 截断由 `Tool.run` 加
+  `…（结果已截断）`。不占 AI 定稿行）。
 - 心态标记机制不动：工具标签不进 `_assistant_full`，正文保留标记。
 
 ### 5.5 标签剥离与 TTS 兼容
@@ -208,7 +214,7 @@ def get_weather(params: dict) -> str:
 | 工具 | 说明 | 依赖 |
 |---|---|---|
 | `get_time` | 当前日期时间（含星期） | 零网络，本地 |
-| `get_weather` | 城市天气（复用 assistant/ 的 qweather 配置直接 HTTP 调，**不走 MCP** 更轻） | 需要 qweather key（可配） |
+| `get_weather` | 城市天气（复用 assistant/ 的 qweather 配置直接 HTTP 调，**不走 MCP** 更轻）；默认取整周 7 天，可指定城市 / days=3 或 7 | 需要 qweather key（可配） |
 
 其余（搜索/技能/文件）以"丢 py 文件进 `tool/`"即插，一期不内置。
 

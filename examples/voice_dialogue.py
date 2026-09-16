@@ -702,10 +702,15 @@ def main():
 
     def on_tool(name, attrs, text, dt, ok):
         # 工具执行结果 → 控制台独立状态行（与 [门控]/[合并] 同款诊断；不占 AI 定稿行）
+        # 参数 + 耗时（"耗时"=工具实际执行秒数）；结果预览限 120 字，截断加省略号
+        params = " ".join('%s="%s"' % (k, v) for k, v in attrs.items()) if attrs else "（无参数）"
         if ok:
-            con.status("[工具] %s → %.2fs\n    %s" % (name, dt, text[:120]))
+            body = text
+            if len(body) > 120:
+                body = body[:120] + "…（预览截断，完整 %d 字已送 LLM）" % len(text)
+            con.status("[工具] %s %s 耗时 %.2fs\n    %s" % (name, params, dt, body))
         else:
-            con.status("[工具] %s × 失败：%s" % (name, text[:120]))
+            con.status("[工具] %s %s × 失败：%s" % (name, params, text[:120]))
 
     asr.on_partial(on_partial)
 

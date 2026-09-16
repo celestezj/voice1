@@ -91,18 +91,19 @@ def _query(city, days):
     "查询天气（当前/未来几天，含温度、降水、风；默认当前配置位置，可指定城市）",
     {
         "city": "[可选] 城市名，如 北京 或 北京市；不填则查询当前配置位置",
-        "days": "[可选] 预报天数：3 或 7，默认 3",
+        "days": "[可选] 预报天数：3 或 7，默认 7（整周覆盖，用户可能追问后面几天）",
     },
     explanation=("复用和风天气 qweather：城市→经纬度→当前+预报→AI 易读摘要。"
-                 "需要天气/温度/降水信息时调用。"),
+                 "需要天气/温度/降水信息时调用。默认取整周（7 天）预报，"
+                 "用户追问后面几天/别的城市时不用重查就能答；确实超出范围再重新调用。"),
     timeout=15.0,
     max_result=1200,
 )
 def get_weather(params: dict) -> str:
     city = (params.get("city") or "").strip()
     try:
-        days = int(params.get("days") or 3)
-        days = days if days in (3, 7) else 3
+        days = int(params.get("days") or 7)
+        days = days if days in (3, 7) else 7
     except (TypeError, ValueError):
-        days = 3
+        days = 7
     return _query(city, days)

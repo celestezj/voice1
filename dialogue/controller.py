@@ -268,6 +268,9 @@ class DialogueController:
             lines.append("  " + t.to_prompt_doc())
             if t.explanation:
                 lines.append("    " + t.explanation)
+        lines.append("- 每轮对话都可以调用工具，且可以随时再次调用：用户追问新日期/新城市等"
+                     "此前结果没覆盖的信息时，重新调用对应工具获取，不要用旧结果硬答，"
+                     "也不要说\"没有数据/查不到\"——先调用工具试试。")
         lines.append("- 调用前先说一句过渡语（用户听得到），然后输出标签，等收到 [工具结果] 后继续回答。")
         lines.append("- 注意：& < > 等字符要用 &amp; &lt; &gt; 转义；标签本身不会被用户听到。")
         return "\n".join(lines)
