@@ -147,7 +147,9 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   第一批工具：`get_time`（零网络）/ `get_weather`（复用 assistant/qweather 技能直接
   HTTP 调，不走 MCP；**默认取整周 7 天**）。**追问自动重查**：提示词明确"每轮都可调用、
   随时可再次调用"——用户追问新日期/新城市等旧结果没覆盖的信息时模型会重新调用工具，不
-  硬答旧数据。headless 测试 `tmp/test_llm_tools.py`。完整设计见 `docs/llm-tools.md`。
+  硬答旧数据。**结果权威一次说清**：`[工具结果]` 注入消息与 system 都声明结果是权威事实、
+  一次回答、不重复不编造（防单次输出重复两版自相矛盾，2026-09-16 实测）。
+  headless 测试 `tmp/test_llm_tools.py`。完整设计见 `docs/llm-tools.md`。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > `--llm-config` 指定文件 > 默认
   `config.local.json` > 环境变量 `DEEPSEEK_API_KEY`（`--llm-config` 可换整份配置）。
