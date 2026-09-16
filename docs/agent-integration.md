@@ -178,7 +178,7 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
   MCP；新增 MCP 无需改码，server 名即 json 键）。实测金价 MCP 放行后 agent 直接调
   `get_gold_history` 拿真实数据、不再报被拦。
   **独立 venv 的 MCP（search，2026-09-13）**：`free-search-mcp` 装在独立 venv
-  `assistant/.venv-search`（editable 指向 `E:\temp\free-search-mcp\src`），不能配裸
+  `assistant/.venv-search`（editable 指向本机 `free-search-mcp` 源码 checkout），不能配裸
   `python`——`agent.py` 会把 `command: python` 替换成 voice-asr 的 python，`-m search_mcp`
   在其内报 No module named → server 启动失败 → 工具不挂载（实测 AI 只有金价工具、search
   隐形）。正确配置：`command: ".venv-search/Scripts/python.exe", args: ["-m", "search_mcp"]`

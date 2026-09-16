@@ -7,9 +7,9 @@
 > 工具包放仓库根 **`tool/`**（用户拍板：独立顶层文件夹，非 `dialogue/tools/`）。
 > 配套 headless 测试 `tmp/test_llm_tools.py`（解析器单元 / 假 LLM 两轮流 / 安全阀 / 默认关零变化）。
 >
-> 参考实现：`E:\temp\Alife\sources\Alife.Function\Alife.Function.FunctionCaller\`
+> 参考实现：Alife（https://github.com/BDFFZI/Alife）`Alife.Function.FunctionCaller`
 > （`XmlFunctionCaller.cs` / `XmlStreamParser.cs` / `XmlStreamExecutor.cs` / `XmlHandler.cs`）
-> 与 `Alife.Function.Language.OpenAI\OpenAILanguageModel.cs`。
+> 与 `Alife.Function.Language.OpenAI` 的 `OpenAILanguageModel.cs`。
 
 ## 1. 背景与动机
 
@@ -203,6 +203,66 @@ def get_weather(params: dict) -> str:
 | `max_result` | 800 字 | 结果截断（单工具可调） |
 | 异常 | — | 工具抛异常 → 回灌 `[工具错误: 原因]`，让模型优雅回应 |
 | 结果角色 | user | 与 Alife 一致（XML 方案不用原生 tool_calls，不能用 role=tool） |
+
+### 5.7 多轮流时序图（链条式工具调用）
+
+`_llm_loop` 是 `while True` 多轮循环：每轮一次 `stream_chat(messages)`（messages 每轮追加
+`[工具结果]` 后复用）——链条式多轮天然支持（如 `get_time → search_flight(date=…) → 答案`），
+同一轮吐多个标签也支持（全部执行、合进一条 `[工具结果]`）。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant USR as 用户定稿句
+    participant CTL as DialogueController
+    participant LLM as LLM 流线程 dialogue-llm<br/>（DeepSeek SSE）
+    participant PSR as ToolXmlParser<br/>dialogue/toolparse.py
+    participant TOOL as 本地工具 tool/<br/>Tool.run 独立线程+超时守卫
+    participant TTS as TTS voice0 queue
+
+    Note over CTL: feed_asr_sentence → gen+=1<br/>启动 _llm_loop 线程（非阻塞）
+    CTL->>LLM: _llm_loop(gen, messages)<br/>system(+工具文档)+history+user
+
+    rect rgb(238,244,255)
+    Note over LLM,TOOL: 第 1 轮：模型吐「过渡句 + 工具标签」
+    LLM->>LLM: round_no=1 · parser.reset()<br/>stream_chat(messages) 阻塞读流
+    loop 每个流式 delta
+        LLM->>PSR: feed(delta) → (clean, calls)
+        PSR-->>LLM: 正文（剥标签）→ _assistant_buf<br/>心态解析 / on_ai_delta 控制台预览<br/>_emit_sentences 切句 → TTS
+        alt 捕获到工具标签 calls
+            Note over LLM: 过渡句先送 TTS 出声<br/>（_assistant_buf 清空送出，工具执行期用户听得见）
+            LLM->>TOOL: _run_tool(call) 锁外执行
+            TOOL-->>LLM: 结果文本 / [工具错误:…]
+            LLM-->>CTL: on_tool → 控制台<br/>[工具] name 参数 耗时 X.XXs
+        end
+    end
+    LLM->>LLM: pending 非空？<br/>空 → break（单轮=旧行为）
+    end
+
+    rect rgb(255,248,230)
+    Note over LLM,CTL: 结果回灌 → 续轮（同一 gen / 同一条流线程）
+    LLM->>LLM: messages.append([工具结果] 权威数据…)
+    LLM->>LLM: round_no < max_rounds？<br/>是 → 再 stream_chat(messages) 第 2 轮
+    end
+
+    rect rgb(235,250,235)
+    Note over LLM,TOOL: 第 2 轮：模型看到工具结果<br/>→ 最终答案 或 再吐新标签（链条继续）
+    loop 每个流式 delta
+        LLM->>PSR: feed(delta) → (clean, calls)
+        LLM->>TTS: _emit_sentences 切句 → tts.submit
+    end
+    Note over LLM: round_no >= max_rounds：<br/>最后一批结果仍进历史，但不再续 LLM
+    end
+
+    rect rgb(252,240,246)
+    Note over CTL,LLM: 收尾 finally（gen 未变才做）
+    LLM->>LLM: tail 残句送 TTS<br/>（_with_pending_mood 拼回心态标记）
+    LLM->>CTL: commit(full)<br/>问题 → [工具结果]×N → 答复 全进 _history
+    CTL->>CTL: _maybe_compress()（历史超阈值→后台压缩）
+    end
+
+    Note over LLM: 打断 gen+1 / hard_stop：<br/>在途 LLM 流弃 · TTS 切音<br/>in-flight 工具结果作废不 commit<br/>被打断的问题保留进历史
+```
 
 ## 6. 参数控制（防旧功能衰退）
 
