@@ -259,6 +259,25 @@ def _list_vits_voices():
                 print(line, flush=True)
 
 
+def _list_moss_voices():
+    """--tts-list-voices：打印 voice0 moss 内置音色清单（读 manifest，无需加载模型）。"""
+    import json
+    man = os.path.join(_VOICE0, ".cache", "moss", "models",
+                       "MOSS-TTS-Nano-100M-ONNX", "browser_poc_manifest.json")
+    if not os.path.isfile(man):
+        print("错误：找不到 moss 音色清单 %s" % man, flush=True)
+        print("moss 模型未下载，先跑 voice0 的 `python preload_moss.py` 一次（权重在 "
+              "voice0/.cache/moss/，不占 voice1 空间）。", flush=True)
+        sys.exit(1)
+    with open(man, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for v in data.get("builtin_voices") or []:
+        name = v.get("voice")
+        disp = v.get("display_name") or ""
+        print("%s  %s" % (name, disp), flush=True)
+    print("克隆：voice=\"clone:<参考wav路径>\" 零样本克隆（参考音频 3-10s 最佳）。", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asr-device", default="cuda", help="auto|cpu|cuda（ASR）")
@@ -267,15 +286,17 @@ def main():
                     help="TTS 响度归一化（默认 None=原样播放）：rms=逐句静态 RMS 对齐 "
                          "-24dBFS（句间音量更一致）；agc=静态对齐+句内动态压缩+短停压缩"
                          "（治句首轻/句尾轻/中间响，推荐）")
-    ap.add_argument("--tts-backend", choices=["melo", "vits"], default="melo",
+    ap.add_argument("--tts-backend", choices=["melo", "vits", "moss"], default="melo",
                     help="TTS 后端（默认 melo）：vits=多音色（--tts-list-voices 看清单，"
-                         "--tts-voice-id 选音色）")
+                         "--tts-voice-id 选音色）；moss=MOSS-TTS-Nano（CPU 实时+流式+零样本"
+                         "克隆，18 个内置音色，--tts-voice-id 选音色或 clone:<wav>）")
     ap.add_argument("--tts-voice-id", default=None,
-                    help="vits 音色（默认 551 派蒙）：数字=speaker id（0~803）或名字"
-                         "（如 可莉）；melo 忽略")
+                    help="音色：vits=数字 speaker id（0~803）或名字（如 可莉，默认 551 派蒙）；"
+                         "moss=内置音色名（默认 Xiaoyu，--tts-list-voices 看清单）或 "
+                         "clone:<参考wav路径> 零样本克隆；melo 忽略")
     ap.add_argument("--tts-list-voices", action="store_true",
-                    help="列出 vits 音色清单（读 voice0/.cache/vits/VITS/speakers_list.txt）"
-                         "并退出")
+                    help="列出 TTS 音色清单并退出：vits 读 voice0/.cache/vits/VITS/"
+                         "speakers_list.txt；moss 读 manifest（无需加载模型）")
     ap.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True,
                     help="ASR 流式（默认开；--no-streaming 退化为整句）")
     ap.add_argument("--input-device", default=None, help="麦克风设备：序号或名称子串")
@@ -430,9 +451,12 @@ def main():
         from dialogue.debug_log import enable as _dbg_enable
         _dbg_enable()      # 命令行开关开启 TTS 调试埋点（=VOICE1_DEBUG_TTS=1）
 
-    # ---- vits 音色清单（--tts-list-voices）：打印后退出，不初始化引擎 ----
+    # ---- 音色清单（--tts-list-voices）：按当前后端分派，打印后退出，不初始化引擎 ----
     if args.tts_list_voices:
-        _list_vits_voices()
+        if args.tts_backend == "moss":
+            _list_moss_voices()
+        else:
+            _list_vits_voices()
         sys.exit(0)
 
     # ---- 麦克风 ----

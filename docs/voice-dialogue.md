@@ -29,8 +29,8 @@
 
 ## 一键启动脚本（start_dialogue.bat / start_dialogue.sh）
 
-签名：`start_dialogue.bat [llm|agent] [vits|melo] [额外参数...]`（sh 同理，`bash start_dialogue.sh [llm|agent] [vits|melo] [额外参数...]`）。
-`llm / agent / vits / melo` 四个**快捷词任意顺序**，脚本逐个消费，遇到非快捷词即停止、其余原样透传；只传一个快捷词时其余用默认。
+签名：`start_dialogue.bat [llm|agent] [vits|moss|melo] [额外参数...]`（sh 同理，`bash start_dialogue.sh [llm|agent] [vits|moss|melo] [额外参数...]`）。
+`llm / agent / vits / moss / melo` 五个**快捷词任意顺序**，脚本逐个消费，遇到非快捷词即停止、其余原样透传；只传一个快捷词时其余用默认。
 
 | 启动命令 | 效果 |
 |---|---|
@@ -38,9 +38,11 @@
 | `start_dialogue.bat llm` | 显式 llm + melo |
 | `start_dialogue.bat agent` | **agent 大脑**（本地 claude 常驻，`--brain agent`；`sessions/agent_session_id.txt` 有历史自动 `--agent-resume` 续会话，无则新建；不带 `--llm-config`） |
 | `start_dialogue.bat vits` | llm + **vits 多音色**（默认音色 551 派蒙） |
-| `start_dialogue.bat melo` | 显式 melo（与默认相同，用于覆盖前面的 vits） |
+| `start_dialogue.bat moss` | llm + **moss**（MOSS-TTS-Nano，CPU 实时+流式+零样本克隆，默认音色 Xiaoyu 中文女声） |
+| `start_dialogue.bat melo` | 显式 melo（与默认相同，用于覆盖前面的 vits/moss） |
 | `start_dialogue.bat agent vits` | agent + vits（`vits agent` 顺序任意等价） |
-| `start_dialogue.bat vits --tts-voice-id 可莉` | vits + 指定音色（id 或名字；melo 下忽略） |
+| `start_dialogue.bat vits --tts-voice-id 可莉` | vits + 指定音色（id 或名字） |
+| `start_dialogue.bat moss --tts-voice-id clone:ref.wav` | moss + 指定音色（内置名或 clone:<wav>） |
 | `start_dialogue.bat agent vits --vad-tail 600` | agent + vits + 透传任意 voice_dialogue 参数 |
 
 > 透传参数走 argparse「后者覆盖」：`--tts-backend melo` 直接透传也能在最后覆盖前面的 vits 快捷词（同理 `--tts-voice-id`/`--vad-tail` 等）。
@@ -61,7 +63,8 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 ```
 
 - `--asr-device cuda`：ASR（paraformer）跑 GPU；无 GPU 换 `cpu`（实时性差些）。
-- `--tts-device cuda`：TTS 跑 GPU（默认 **melo**；换 vits 多音色加 `--tts-backend vits`）。
+- `--tts-device cuda`：TTS 跑 GPU（默认 **melo**；换 vits/moss 加 `--tts-backend vits|moss`。
+  moss 是 CPU 实时模型，GPU/CPU 均可）。
 - `--vad-tail 300`：把静音判定从默认 600ms 降到 300ms，**每轮首包音频快 300ms**。
   代价是组织语言停顿 >300ms 时句子会被提前判定"说完"（残句）——残句由 post-commit
   barge 零延迟兜底：续句定稿在窗口内 → 撤答复合并重答；窗口外 → 变独立一轮（尾巴不丢）。
@@ -75,11 +78,16 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - `--tts-backend`：TTS 后端，默认 `melo`；`vits`=多音色（804 种），一键切用
   `start_dialogue.bat vits`（sh 同理），或直接 `--tts-backend vits`。vits 权重在
   `voice0/.cache/vits/`（属 voice0 项目，用 voice0 的 `preload_vits.py` 一次性下载；
-  缺权重时 voice0 会报错并提示）。
-- `--tts-voice-id`：vits 音色，默认 551 派蒙。数字=speaker id（0~803，如 `103`=可莉）
-  或名字（如 `可莉`）；`melo` 后端下忽略。
-- `--tts-list-voices`：打印全部 804 个 vits 音色（`id: 名字`）后退出（不启动对话），
-  方便挑音色。
+  缺权重时 voice0 会报错并提示）。`moss`=MOSS-TTS-Nano（CPU 实时 + 原生流式 +
+  零样本克隆，TTFA≈0.3s，加载 ~5s），一键切用 `start_dialogue.bat moss`，或直接
+  `--tts-backend moss`；moss 权重在 `voice0/.cache/moss/`（voice0 的
+  `preload_moss.py` 一次性下载；缺权重时 `--tts-list-voices` 或启动会提示）。
+- `--tts-voice-id`：音色。vits=数字 speaker id（0~803，如 `103`=可莉）或名字（如
+  `可莉`），默认 551 派蒙；moss=内置音色名（默认 Xiaoyu 中文女声，共 18 个，
+  `--tts-list-voices` 看清单）或 `clone:<参考wav路径>` 零样本克隆（参考音频 3-10s
+  最佳）；`melo` 后端下忽略。
+- `--tts-list-voices`：打印 TTS 音色清单后退出（不启动对话）：vits=全部 804 个
+  （`id: 名字`）；moss=18 个内置音色名（读 manifest，无需加载模型）。方便挑音色。
 - 打断词默认「停下」，回声门控默认开（半双工）。
 - 唤醒默认开（`--wake-word` 默认"小爱小爱"）：启动即休眠，说唤醒词才进对话，详见
   「休眠 / 唤醒 / 退出」。要恢复"启动即对话"旧行为：`--wake-word ""`。
@@ -453,7 +461,7 @@ sequenceDiagram
 给 **DeepSeek 直连的 LLM 模式**补上工具调用能力，同时**保住它 0.5s 首 token 的速度**——
 不做 agent 编排，参照 Alife 用 **XML 内联工具调用**。完整设计见 `docs/llm-tools.md`。
 
-- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather` 按名加载）。
+- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather,get_gold_history` 按名加载）。
   **默认关**：不传 `--tools` = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径，**旧行为
   零变化**。`--brain agent` 下忽略并打印提示（agent 走 claude 原生工具/MCP，两套不混用）。
 - **工作原理**：系统提示词注入工具文档 → 模型在**输出文本流里直接写自闭合 XML 标签**
@@ -468,13 +476,18 @@ sequenceDiagram
 - **工具包在仓库根 `tool/`**（独立顶层包）：`tool/base.py`（`Tool` / `@tool` 装饰器 / 执行
   超时守卫 + 结果截断）、`tool/__init__.py`（`pkgutil` 自动扫描包内模块，**新增工具 = 丢一个
   py 文件零改码**）、`tool/time_tool.py`（`get_time` 零网络）、`tool/weather.py`
-  （`get_weather` 复用 assistant/qweather 技能直接 HTTP 调，不走 MCP 更轻）。
+  （`get_weather` 复用 assistant/qweather 技能直接 HTTP 调，不走 MCP 更轻）、`tool/gold.py`
+  （`get_gold_history` 复用 assistant/gold 数据管线直接 HTTP 调，不走 MCP 更轻；国内沪金 AU0
+  全历史统计 + 国际现货金实时，含免责声明）。
 - **参数**：
   - `--tools-max-rounds <n>`（默认 3）：工具续轮上限，防无限循环。
   - `--tools-timeout <秒>`：覆盖单工具默认执行超时（不传用自带，如 get_time=3s /
     get_weather=15s）。
 - **安全阀**：工具执行在独立线程 + 超时守卫（防挂死拖住 LLM 流）；异常/超时/未知工具都回灌
   `[工具错误: …]` 让模型优雅回应；结果按 `max_result` 截断防爆上下文。
+- **网络代理**（2026-09-18）：代码**不写死代理地址**；`load_tools()` 时未显式配
+  `HTTP_PROXY`/`HTTPS_PROXY` → 自动 `NO_PROXY=*` 绕过 Windows 系统代理直连（金价/天气国内源
+  可达，Clash 没开也能查）；显式配了代理环境变量则尊重。
 - **结果权威、一次说清**（2026-09-16 实测补）：`[工具结果]` 注入消息与 system 都声明结果数据
   是**权威事实**、直接据此回答**一次**，不要重复/复述、不要编造数据里没有的数字——曾实测
   DeepSeek 在**单次输出**里把同一问题答了两遍且自相矛盾（一次 30/23 有小雨、一次 30/22
@@ -668,8 +681,8 @@ t+4300+    只听"停下"（回声到了，防止 AI 回答自己的回声）
 只有 `done`（整个任务**播完**或被打断才置位）、`wait()`、`canceled`、`timing`（仅 profile
 开时才有、是内部基准结构而非 API 契约），**没有"已开始播放"的事件信号**。所以"音频从喇叭
 里出来"这个瞬间在现有接口下观测不到，只能拿"合成需要多久"（唯一可预测的量）去估算——
-窗口设成 1.5s ≈ melo 首句合成延迟的上限。（换 **vits** 后端后首句合成延迟不同——
-  若补句总被吞/总重答，按实测微调 `--post-commit-window`。）
+窗口设成 1.5s ≈ melo 首句合成延迟的上限。（换 **vits** / **moss** 后端后首句合成延迟不同——
+  vits 更慢、moss 更快（TTFA≈0.3s）；若补句总被吞/总重答，按实测微调 `--post-commit-window`。）
 
 **controller 怎么检测 done（不轮询）**：`_tts_watch` 守护线程**阻塞在 `job.wait()`** 上
 （`threading.Event`，voice0 播完/被打断时调 `mark_done()` 置位才唤醒，永不悬挂），队列排空

@@ -8,9 +8,9 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 echo [info] work dir: %SCRIPT_DIR%
 
-rem 1b. mode args: start_dialogue.bat [llm|agent] [vits|melo] [voice_dialogue extra args...]
+rem 1b. mode args: start_dialogue.bat [llm|agent] [vits|moss|melo] [voice_dialogue extra args...]
 rem     no arg = llm (default); agent = local claude persistent session;
-rem     vits|melo = TTS backend override (default melo)
+rem     vits|moss|melo = TTS backend override (default melo)
 set "BRAIN=llm"
 set "TTSBACKEND="
 :mode_loop
@@ -26,6 +26,11 @@ if /i "%1"=="llm" (
 )
 if /i "%1"=="vits" (
     set "TTSBACKEND=--tts-backend vits"
+    shift
+    goto mode_loop
+)
+if /i "%1"=="moss" (
+    set "TTSBACKEND=--tts-backend moss"
     shift
     goto mode_loop
 )

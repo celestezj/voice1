@@ -28,10 +28,11 @@ if ! python -c "import sys; sys.exit(0 if 'voice-asr' in sys.executable else 1)"
 fi
 
 echo "[启动] voice-asr 环境 OK，开始语音对话（Ctrl+C 退出）..."
-# TTS 后端快捷词：start_dialogue.sh vits|melo（默认 melo；vits=多音色）
+# TTS 后端快捷词：start_dialogue.sh vits|moss|melo（默认 melo；vits=多音色；moss=CPU 实时+克隆）
 TTS_BACKEND=""
 case "${1:-}" in
     vits) TTS_BACKEND="--tts-backend vits"; shift ;;
+    moss) TTS_BACKEND="--tts-backend moss"; shift ;;
     melo) TTS_BACKEND="--tts-backend melo"; shift ;;
 esac
 # 默认参数：agent 流式增量送 TTS + 会话调试日志落 sessions/

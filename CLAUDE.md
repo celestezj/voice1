@@ -103,14 +103,18 @@ voice0 仓库地址：https://github.com/celestezj/voice0
 - **TTS 后端/音色**：默认 **melo**（一键启动即 melo）。换 vits 多音色：`start_dialogue.bat vits`
   快捷词（或 `--tts-backend vits`）；音色用 `--tts-voice-id <id或名字>`（默认 551 派蒙；
   `--tts-list-voices` 打印 804 个音色）。vits 权重在 voice0/.cache/vits/（voice0
-  `preload_vits.py` 一次性下载，voice0 只读不代管）。
-- **一键启动脚本** `start_dialogue.bat [llm|agent] [vits|melo] [额外参数...]`（sh 同理），
-  四个快捷词**任意顺序**，其余参数原样透传（放在最后）。完整签名与组合见
+  `preload_vits.py` 一次性下载，voice0 只读不代管）。换 **moss**（MOSS-TTS-Nano，
+  CPU 实时 + 原生流式 + 零样本克隆）：`start_dialogue.bat moss`（或 `--tts-backend moss`）；
+  音色 `--tts-voice-id` 用内置名（默认 Xiaoyu 中文女声，共 18 个，`--tts-list-voices`
+  看清单）或 `clone:<参考wav路径>` 零样本克隆（参考音频 3-10s 最佳）；moss 权重在
+  voice0/.cache/moss/（voice0 `preload_moss.py` 一次性下载，voice0 只读不代管）。
+- **一键启动脚本** `start_dialogue.bat [llm|agent] [vits|moss|melo] [额外参数...]`（sh 同理），
+  五个快捷词**任意顺序**，其余参数原样透传（放在最后）。完整签名与组合见
   `docs/voice-dialogue.md`「一键启动脚本」；默认不传 = **llm + melo**；
   `start_dialogue.bat agent` = **agent** 接入（本地 claude 常驻会话，`--brain agent`），
   **若 `sessions/agent_session_id.txt` 已有历史则自动加 `--agent-resume` 续上次会话**，
   无则新建；llm 模式自动带 `--llm-config dialogue\config.local.json`（agent 模式不带）；
-  `vits` = 换 vits 多音色、`melo` = 显式 melo。透传例：
+  `vits` = 换 vits 多音色、`moss` = 换 moss（CPU 实时 + 克隆）、`melo` = 显式 melo。透传例：
   `start_dialogue.bat agent vits --vad-tail 600 --tts-voice-id 可莉`。
   **默认参数（2026-09-14）**：一键启动固定带 `--agent-stream-tts --debug-tts`——agent
   流式增量送 TTS + 会话调试日志落 `sessions/`（排"说了 X 就卡住"全靠它）。两者都是
