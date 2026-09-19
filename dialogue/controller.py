@@ -88,6 +88,10 @@ class DialogueController:
         self._llm = llm
         self._agent = agent
         self._tts = tts
+        # 心态发射改由 SayTTS 播放链在"本句开播"瞬间执行（2026-09-19）：live2d 开时
+        # tts 是 SayTTS 代理（有 mood_supported），controller 随 submit 带句首心态；
+        # live2d 关时 tts 是裸 voice0（无此属性）→ 不传（无 live2d 也无处可发）。
+        self._mood_supported = bool(getattr(tts, "mood_supported", False))
         self._system = system_prompt or (
             "你是语音助手。回答要口语化、简洁、适合语音播报：不要用 markdown、列表、"
             "符号或缩写；一次说 1-3 句话即可，必要时追问一句；不知道就直说。")
@@ -127,8 +131,9 @@ class DialogueController:
         self._on_llm_error = None    # LLM 流抛异常（供控制台报错行）
         self._on_merge_rollback = None   # post-commit barge 撤答复（供控制台提示）
         self._mood_marker = bool(mood_marker)   # 心态标记总开关（False=全部跳过，行为同改动前）
-        self._mood = None                # 当前回复解析出的心态（None=尚未解析到标记）
-        self._on_mood = None             # 心态标记解析到（供上层显示/表情映射；正文里标记照常保留）
+        self._mood = None                # 本回复是否出现过心态标记（None=尚未；finally 判"没带标记"）
+        self._mood_pos = 0               # _parse_mood_locked 增量扫描位置（只维护 _mood 状态，
+                                         # 发射已挪到 SayTTS 播放链——见 _submit_tts/_leading_mood）
         # LLM 模式工具（--tools，docs/llm-tools.md）：默认关。开时 _llm_loop 走多轮循环——
         # 边流边解析 XML 标签→执行工具→结果回灌续轮（同一 gen/线程，barge-in 整轮作废）。
         self._tools = None               # {name: Tool} 或 None（关）
@@ -176,7 +181,8 @@ class DialogueController:
     def register_callbacks(self, on_user=None, on_ai_delta=None,
                            on_ai_sentence=None, on_ai_done=None,
                            on_llm_start=None, on_llm_error=None,
-                           on_merge_rollback=None, on_mood=None, on_tool=None):
+                           on_merge_rollback=None, on_tool=None):
+        # 注意：心态发射已不在本类（挪到 SayTTS 播放链，主程序 idle_tts.set_mood_cb 注入）
         self._on_user = on_user
         self._on_ai_delta = on_ai_delta
         self._on_ai_sentence = on_ai_sentence
@@ -184,7 +190,6 @@ class DialogueController:
         self._on_llm_start = on_llm_start
         self._on_llm_error = on_llm_error
         self._on_merge_rollback = on_merge_rollback   # post-commit barge 撤答复（供控制台提示）
-        self._on_mood = on_mood
         self._on_tool = on_tool                       # 工具执行完成（供控制台 [工具] 诊断行）
 
     def set_agent(self, agent, *, stream_tts=False):
@@ -380,14 +385,22 @@ class DialogueController:
         """提交给 TTS 并登记忙碌跟踪（首个任务起守护 watcher，排空后 _tts_busy 回落）。"""
         if not any(ch.isalnum() for ch in sentence):
             return      # 纯标点/空白段（换行残留的 `"》》`、`"` 等）不送 TTS——避免合成标点怪声
+        # 播放时间轴心态发射（2026-09-19）：心态标记文本到达即发 = 全挤在 LLM 流结束的
+        # ~1s 里、音频却要播几十秒——live2d 表情全程卡最后一个标签。改成本句心态在提交
+        # 前提取（此刻标记还没被 _clean_for_tts 剥掉，_with_pending_mood 已把它拼到句首），
+        # 随 submit 带给 SayTTS 播放链，在"本句实际开播"瞬间发射（说话框同款 job.done 时序）。
+        mood = self._leading_mood(sentence)
         sentence = self._clean_for_tts(sentence)
         if not any(ch.isalnum() for ch in sentence):
             return      # 剥净后纯标点/纯标记（如独立 `。”`、`【心态：xxx】`）也不送
-        dbg("TTS_SUBMIT text=%r" % sentence[:24])
+        dbg("TTS_SUBMIT text=%r mood=%r" % (sentence[:24], mood))
         # KWS「停下」宽守卫已于 2026-09-14 停用（见 kws_guard_active 注释）：原来按估算播放
         # 时长顺延屏蔽"停下"，实测把用户真"停下"整段吞掉（222157 日志 6~7 次守卫命中全是
         # 用户在重复说"停下"），真"停下"随时生效，播放期随时可打断。
-        job = self._tts.submit(sentence)
+        if self._mood_supported:
+            job = self._tts.submit(sentence, mood=mood)   # SayTTS 播放链：本句开播时发心态
+        else:
+            job = self._tts.submit(sentence)
         with self._lock:
             if self._turn_first_submit_ts is None:
                 self._turn_first_submit_ts = time.monotonic()  # 本轮首句提交时刻（post-commit 锚点）
@@ -586,6 +599,7 @@ class DialogueController:
             self._turn_first_submit_ts = None  # 新一轮：首句提交时刻锚点重置
             if self._mood_marker:
                 self._mood = None              # 新一轮：心态标记重新解析
+                self._mood_pos = 0             # 扫描位置复位（从头扫新回合的标记）
             gen = self._gen
             if self._agent is not None:
                 text = self._user_turn
@@ -779,6 +793,9 @@ class DialogueController:
             if self._closed or ctx != self._gen:
                 return
             self._assistant_display += delta
+            self._assistant_full += delta        # 流式累计完整文本：心态标记实时解析
+            if self._mood_marker:
+                self._parse_mood_locked()        # 心态实时切 live2d 表情（与 LLM 路径同源）
             disp = self._assistant_display
             dbg("PARTIAL ctx=%s buf=%d delta=%r" % (ctx, len(self._agent_tts_buf), delta[:20]))
             if self._agent_stream_tts:
@@ -976,7 +993,8 @@ class DialogueController:
                     else:
                         self._assistant_buf = raw
                     if self._mood_marker:
-                        self._parse_mood_locked()
+                        self._mood_pos = 0        # _assistant_full 刚被权威全文替换：从头重扫，
+                        self._parse_mood_locked() #  不漏结果里未被流式发射过的心态（重复幂等）
             elif not self._closed:
                 # 结果回来时代际已变（新句/幻影句抢在结果前）→ 本回合结果被丢弃。打点以便
                 # 区分"重播未提交"（结果被丢）与"重播提交后被杀"（结果处理了、后续又被打断）。
@@ -1065,23 +1083,49 @@ class DialogueController:
             self._history = self._history[len(self._history) - self._max_history:]
 
     # ---------------- 心态标记（user_prompt 约定的【心态：xxx】：保留在正文，仅送 TTS 时剥掉不读）----------------
+    def _leading_mood(self, sentence):
+        """提取句子的心态（随 submit 带给 SayTTS 播放链，在"本句实际开播"瞬间发射）。
+
+        在 `_clean_for_tts` **之前**调用——此刻标记还在句子里（`_with_pending_mood` 已把
+        攒着的纯标记段拼回句首）。取**首个** `_MOOD_RE` 匹配：句首标签是主流；句中/句尾
+        标签也兜底（`_find_cut` 把标签闭合处当切点，理论上标签总在句首，但工具过渡句等
+        tail 直通路径不经过 _find_cut）。无标记 → None（继承当前心态，不切表情）。
+        超纲词兜底「平和」（与 _parse_mood_locked 同口径）。mood_marker 关 → 恒 None。
+        """
+        if not self._mood_marker:
+            return None
+        m = self._MOOD_RE.search(sentence)
+        if not m:
+            return None
+        mood = (m.group(1) or "").strip()
+        return mood if mood in self._MOODS else "平和"
+
     def _parse_mood_locked(self):
-        """从流式文本里解析心态标记。调用方持锁。
+        """从流式文本里维护 `_mood` 状态（判"本回复是否带心态标记"）。调用方持锁。
 
         标记**保留**在 _assistant_buf/_assistant_full 里（它是模型的真实输出：控制台打印、
         历史存档、LLM 上下文都要带上），只在 `_submit_tts` 送 TTS 那一刻被 _MOOD_SUB 剥掉。
-        标记是流式逐 token 到达、可能被切开（如「【心态」「：」「开心】」），因此每 delta
-        都对累计文本重试：_MOOD_RE 取首个心态记录（on_mood 回调，供上层显示/表情映射）。
-        LLM 没带标记 → _mood 保持 None，流末 finally 兜底为「平和」。
+        **发射已挪到 SayTTS 播放链**（_submit_tts 提交前 `_leading_mood` 提取、随 submit
+        带入，在"本句实际开播"瞬间发 live2d 表情——文本到达即发会让全部心态挤在 LLM 流
+        结束的 ~1s 里、音频播几十秒时表情全程卡最后一个标签，2026-09-19）。本函数只维护
+        `_mood`（None=还没出现标记，流末 finally 兜底「平和」）与 `_mood_pos`（增量扫描
+        位置，新回合 _launch_llm 复位；_assistant_full 被 agent 结果整体替换/清零时兜底
+        从头扫）。
         """
-        if self._mood is not None:
+        if not self._mood_marker:
             return
-        m = self._MOOD_RE.search(self._assistant_full)
-        if m:
+        full = self._assistant_full
+        pos = self._mood_pos
+        if pos > len(full):
+            pos = 0                       # _assistant_full 被替换/清零，位置失效 → 从头扫
+        while True:
+            m = self._MOOD_RE.search(full, pos)
+            if not m:
+                break
             mood = (m.group(1) or "").strip()
-            self._mood = mood if mood in self._MOODS else "平和"   # 超纲词兜底
-            if self._on_mood:
-                self._on_mood(self._mood)
+            self._mood = mood if mood in self._MOODS else "平和"   # 超纲词兜底（状态标记）
+            pos = m.end()
+        self._mood_pos = pos
 
     # ---------------- 切句 → TTS ----------------
     def _emit_sentences(self, gen):
@@ -1150,14 +1194,20 @@ class DialogueController:
             i = buf.find(ch, start_idx)
             if i >= 0 and (first < 0 or i < first):
                 first = i
-        # 1a) 心态标记闭合处（】/] 之后）也可作切点：模型常在句中切换心态
-        #     （"…哈【心态：开心】阿阳…"），不当切点会把前后句粘成一个 TTS Job
-        #     （合并气泡/超长句，live2d 逐句跟播失效）。标记本身随前句被 _MOOD_SUB
-        #     剥掉不念；闭合处在句末边界之前 → 优先按标记切。
+        # 1a) 心态标记处也可作切点：模型常在句中切换心态（"…哈【心态：开心】阿阳…"），
+        #     不当切点会把前后句粘成一个 TTS Job（合并气泡/超长句，live2d 逐句跟播失效）。
+        #     **切在标签前**（标签领衔下一句）：标签语义修饰其后的内容；按闭合处切会把
+        #     标签粘在前句尾巴，而 `_leading_mood` 只取句首首个心态 → 句中后一个心态被吞
+        #     （实测 "…摊低成本对吧 我懂【心态：温柔】但你别硬加…" 温柔随前句 submit 后
+        #     丢失，播放链只发担心/关切/期待，2026-09-19）。标签在缓冲开头（start==0）
+        #     则按闭合处切、抽成纯标记段攒着拼回下句（_with_pending_mood）。
         m = self._MOOD_SUB.search(buf, start_idx)
         if m is not None:
+            start = m.start()
             end = m.end()
             if first < 0 or end <= first:
+                if start > 0 and len(buf[:start].strip()) >= 2:
+                    return self._absorb_closers(buf, start)
                 if len(buf[:end].strip()) >= 2:
                     return self._absorb_closers(buf, end)
         if first >= 0 and len(buf[:first + 1].strip()) >= 2:

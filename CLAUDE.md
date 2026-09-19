@@ -387,7 +387,15 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   （AI 播放期 mic 只听"停下"，此刻说话不被识别——离远/音量低时 VAD 不闭句，句子
   "悬在流式 cache"永远不定稿，正是`… `行无后续的成因）。
 - **live2d 桌宠联动**（`--live2d-port PORT`，可选）：**两通道**——① LLM 心态【心态：xxx】→
-  发 desktop_pet 切表情；② **所有送 TTS 的文本**→ 角色头顶说话框（对话回复/就绪语/告别语/
+  发 desktop_pet 切表情（**随句子播放发射**：心态标记**文本到达即发** = 全部挤在 LLM 流结束的
+  ~1s 里、音频却要播几十秒——表情全程卡最后一个标签（曾卡第一个）；改由 SayTTS 播放链在
+  **携带该标签的句子实际开播**瞬间发射（说话框同款 `job.done` 时序：前句播完≈下句开播），
+  表情跟听感同步切换。controller `_submit_tts` 提交前 `_leading_mood` 提取句首心态随 submit
+  带给 SayTTS（无标签=继承当前不切；超纲词兜底平和；`_parse_mood_locked` 只维护 `_mood`
+  状态判"没带标记"、不再直接发 on_mood），2026-09-19；LLM/agent 流式所有切句路径都收敛在
+  `_submit_tts`，两模式统一生效。**句中心态不丢**：`_find_cut` 按标签**前**切（标签领衔下一句，
+  `_leading_mood` 取句首首个心态才成立）——旧按闭合处切把句中标签粘前句尾巴、"我懂【心态：
+  温柔】但你别硬加…"的温柔随前句 submit 丢失）；② **所有送 TTS 的文本**→ 角色头顶说话框（对话回复/就绪语/告别语/
   启动问候一个不落，靠包一层 `SayTTS`（dialogue/say_tts.py）的 tts 代理自动 say，controller
   零改动）。**说话框逐句链式跟播不抢发**：voice0 queue 提交即入队、串行播放——LLM 一口气吐
   3 句时 3 个 Job 瞬间入队、音频还在播第 1 句；若 submit 时就发文本，气泡会被末句立刻刷新。

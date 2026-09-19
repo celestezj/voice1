@@ -139,4 +139,53 @@ time.sleep(0.15)
 assert idles == [1], "不应重复复位, 实际 %r" % idles
 print("测试4 跨句停顿 OK: 在途不复位, 流尽续句播完复位一次, said=%r" % said)
 
+# ---- 5. 心态随句播放发射（2026-09-19：随句子实际开播切表情，不挤在文本到达瞬间）----
+# 文本到达即发 = 全部心态挤在 LLM 流结束的 ~1s 里、音频播几十秒 → 表情卡最后一个标签。
+# 修法：controller _submit_tts 提交前提取句首心态随 submit 带入，队首句子"正要开播"
+# 那一刻与说话框同刻发 mood_cb。无标签（mood=None）→ 继承当前心态不切表情。
+moods = []
+tts, p, said, idles = make_proxy()
+p.set_mood_cb(moods.append)
+p.submit("阿阳你别急", mood="担心")
+p.submit("你先听我说完", mood=None)          # 无标签句：继承当前心态，不切表情
+p.submit("别难过哈", mood="温柔")
+_wait(lambda: moods, what="首句心态应随首句开播发出")
+assert moods == ["担心"], "首句只发本句心态, 实际 %r" % moods
+tts.jobs[0].finish()                     # 句一播完 → 句二（无心态）开播
+time.sleep(0.15)
+assert moods == ["担心"], "无心态句不切表情, 实际 %r" % moods
+tts.jobs[1].finish()                     # 句二播完 → 句三（温柔）开播
+_wait(lambda: len(moods) == 2, what="句三心态应随句三开播发出")
+assert moods == ["担心", "温柔"], "心态应随对应句子开播, 实际 %r" % moods
+print("测试5 心态随句播放 OK: %r" % moods)
+
+# ---- 6. 同心态连续去重 + 链排空后新一轮同心态必发（live2d 可能已被 idle 复位成平和）----
+moods = []
+tts, p, said, idles = make_proxy()
+p.set_mood_cb(moods.append)
+p.submit("开心一", mood="开心")
+p.submit("开心二", mood="开心")          # 同心态连续 → 不重复发
+_wait(lambda: moods, what="首句心态应发")
+assert moods == ["开心"]
+for j in tts.jobs:
+    j.finish()                           # 全播完 → 链排空（_last_mood 复位）
+_wait(lambda: _worker_done(p), what="链应排空退出")
+p.submit("新一轮开心", mood="开心")      # 新一轮同心态 → 链排空已复位 → 仍应发
+_wait(lambda: len(moods) == 2, what="新一轮首句同心态应重发（链排空复位）")
+assert moods == ["开心", "开心"], "实际 %r" % moods
+print("测试6 心态去重+排空复位 OK: %r" % moods)
+
+# ---- 7. 未播句被打断：心态丢弃（同作废句文本，不发出不残留）----
+moods = []
+tts, p, said, idles = make_proxy()
+p.set_mood_cb(moods.append)
+p.submit("担心", mood="担心")
+p.submit("温柔", mood="温柔")
+_wait(lambda: moods, what="首句心态应发")
+tts.jobs[1].finish(canceled=True)        # 句二还没轮到就被 hard_stop 取消
+tts.jobs[0].finish()                     # 句一正常播完
+_wait(lambda: _worker_done(p), what="打断后链应退出")
+assert moods == ["担心"], "被取消句的心态不应发出, 实际 %r" % moods
+print("测试7 打断丢心态 OK: %r" % moods)
+
 print("\n全部通过")

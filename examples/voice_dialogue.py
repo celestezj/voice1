@@ -720,9 +720,15 @@ def main():
         con.status("[合并] 撤回了刚才的答复，正在重答完整问题…")
 
     def on_mood(mood):
-        # LLM 回复开头解析到【心态：xxx】→ 送 live2d 切表情（端口可用才真正连）
+        # 心态随句子播放发射（2026-09-19）：SayTTS 在"携带该标签的句子实际开播"瞬间回调
+        # （说话框同款 job.done 时序）——表情跟听感同步切换，不再挤在 LLM 流结束的 1s 里
         if live2d is not None:
             live2d.emit(mood)
+
+    if idle_tts is not None:
+        # 心态发射从 controller 挪到 SayTTS 播放链（controller 不再发 on_mood）；on_mood
+        # 定义晚于 SayTTS 构造，此处单独注入
+        idle_tts.set_mood_cb(on_mood)
 
     def on_tool(name, attrs, text, dt, ok):
         # 工具执行结果 → 控制台独立状态行（与 [门控]/[合并] 同款诊断；不占 AI 定稿行）
@@ -804,7 +810,7 @@ def main():
     ctrl.register_callbacks(on_user=on_user, on_ai_delta=on_ai_delta,
                             on_ai_sentence=on_ai_sentence,
                             on_llm_start=on_llm_start, on_llm_error=on_llm_error,
-                            on_merge_rollback=on_merge_rollback, on_mood=on_mood,
+                            on_merge_rollback=on_merge_rollback,
                             on_tool=on_tool)
     if live2d is not None:
         # 回休眠唯一汇聚点 go_sleep()（bye 在 on_sentence / timeout 在 feed_decision 内部）
