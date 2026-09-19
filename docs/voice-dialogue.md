@@ -467,7 +467,7 @@ sequenceDiagram
 给 **DeepSeek 直连的 LLM 模式**补上工具调用能力，同时**保住它 0.5s 首 token 的速度**——
 不做 agent 编排，参照 Alife 用 **XML 内联工具调用**。完整设计见 `docs/llm-tools.md`。
 
-- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather,get_gold_history` 按名加载）。
+- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather,get_gold_history,get_soviet_joke` 按名加载）。
   **默认关**：不传 `--tools` = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径，**旧行为
   零变化**。`--brain agent` 下忽略并打印提示（agent 走 claude 原生工具/MCP，两套不混用）。
 - **工作原理**：系统提示词注入工具文档 → 模型在**输出文本流里直接写自闭合 XML 标签**
@@ -484,7 +484,9 @@ sequenceDiagram
   py 文件零改码**）、`tool/time_tool.py`（`get_time` 零网络）、`tool/weather.py`
   （`get_weather` 复用 assistant/qweather 技能直接 HTTP 调，不走 MCP 更轻）、`tool/gold.py`
   （`get_gold_history` 复用 assistant/gold 数据管线直接 HTTP 调，不走 MCP 更轻；国内沪金 AU0
-  全历史统计 + 国际现货金实时，含免责声明）。
+  全历史统计 + 国际现货金实时，含免责声明）、`tool/soviet_joke.py`（`get_soviet_joke` 复用
+  assistant 的 soviet-joke skill 语料读 corpus.md 挑一条，不走 MCP；镜像 tell.py 格式不变量，
+  参数 theme 按主题挑 / avoid 避让已讲过的标题防"再来一个"重复）。
 - **参数**：
   - `--tools-max-rounds <n>`（默认 3）：工具续轮上限，防无限循环。
   - `--tools-timeout <秒>`：覆盖单工具默认执行超时（不传用自带，如 get_time=3s /
@@ -497,7 +499,9 @@ sequenceDiagram
 - **结果权威、一次说清**（2026-09-16 实测补）：`[工具结果]` 注入消息与 system 都声明结果数据
   是**权威事实**、直接据此回答**一次**，不要重复/复述、不要编造数据里没有的数字——曾实测
   DeepSeek 在**单次输出**里把同一问题答了两遍且自相矛盾（一次 30/23 有小雨、一次 30/22
-  不下雨）。
+  不下雨）。**`present` 例外**（2026-09-19）：带 `present` 的工具（`get_soviet_joke`）结果是
+  **用户要听的内容本身**，注入消息改带该工具呈现要求（完整逐字讲）并覆盖「不要重复」——
+  实测 DeepSeek 把笑话压成一句评论，用户要的是原文完整讲。
 - **控制台诊断**：工具执行完成打独立状态行
   `[工具] name 参数 耗时 X.XXs`（`on_tool` 回调）——参数（`city="北京"`，无参数显示
   「（无参数）」）+ 耗时 + 结果预览（限 120 字、截断加省略号），不占 AI 定稿行。

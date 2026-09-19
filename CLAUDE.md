@@ -151,7 +151,11 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   第一批工具：`get_time`（零网络）/ `get_weather`（复用 assistant/qweather 技能直接
   HTTP 调，不走 MCP；**默认取整周 7 天**）/ `get_gold_history`（复用 assistant/gold
   数据管线直接 HTTP 调，不走 MCP；国内沪金 AU0 全历史统计 + 国际现货金实时，含免责声明；
-  参照 soviet-joke 模式——确定性逻辑全在数据脚本，Tool 只薄封装不造数）。
+  参照 soviet-joke 模式——确定性逻辑全在数据脚本，Tool 只薄封装不造数）/
+  `get_soviet_joke`（复用 assistant 的 soviet-joke skill 语料直接读 corpus.md 挑一条，
+  不走 MCP；镜像 tell.py 格式不变量——主题剥 `X、` 序号、正文逐字、末尾无空行；参数
+  theme=一/二/三/四 或关键词按主题挑、avoid=<上一条《》标题> 避让防重复，讲完说"再来
+  一个"模型自动带 avoid 再调；语料是 1975 历史文献，当历史段子讲不影射当代）。
   **工具包网络策略**：代码**不写死代理地址**；`load_tools()` 未显式配置 HTTP_PROXY/HTTPS_PROXY
   → 自动 `NO_PROXY=*` 绕过 Windows 系统代理直连（Clash 没开也能查国内源）；显式配了则尊重。
   **追问自动重查**：
@@ -159,6 +163,11 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   随时可再次调用"——用户追问新日期/新城市等旧结果没覆盖的信息时模型会重新调用工具，不
   硬答旧数据。**结果权威一次说清**：`[工具结果]` 注入消息与 system 都声明结果是权威事实、
   一次回答、不重复不编造（防单次输出重复两版自相矛盾，2026-09-16 实测）。
+  **`present` 例外**（2026-09-19 笑话实测）：带 `present` 的工具（`get_soviet_joke`）结果是
+  **用户要听的内容本身**而非"待摘要的数据"——注入消息改带该工具的呈现要求（完整逐字讲、
+  可加一句过渡、不许另编）并覆盖通用「不要重复」（实测 DeepSeek 把笑话原文压成一句评论
+  "这个太损了…"）；「不要编造」对所有工具保留。写新"结果即内容"类工具（故事/段子）记得设
+  `present=`，数据类工具（天气/金价）留空走默认。
   headless 测试 `tmp/test_llm_tools.py`。完整设计见 `docs/llm-tools.md`。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > `--llm-config` 指定文件 > 默认
@@ -455,7 +464,8 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
 tool/            LLM 模式工具包（--tools，docs/llm-tools.md）：base.py（Tool/@tool/超时守卫）+
                  __init__.py（pkgutil 自动扫描，新增工具=丢一个 py 文件零改码）+
                  time_tool.py（get_time 零网络）+ weather.py（get_weather 复用 qweather 技能）+
-                 gold.py（get_gold_history 复用 assistant/gold 数据管线，参照 soviet-joke 模式）
+                 gold.py（get_gold_history 复用 assistant/gold 数据管线，参照 soviet-joke 模式）+
+                 soviet_joke.py（get_soviet_joke 复用 soviet-joke skill 语料，theme/avoid 参数）
 assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力；
                  独立 git 子模块（GitHub 私有仓库，凭据不入库），设计目标/目录结构见 docs/voice-dialogue.md「assistant/ 目录」节
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）

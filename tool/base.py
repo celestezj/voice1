@@ -14,7 +14,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-_RESERVED = {"explanation", "timeout", "max_result"}
+_RESERVED = {"explanation", "present", "timeout", "max_result"}
 
 
 @dataclass
@@ -29,6 +29,11 @@ class Tool:
     description: str                # 一行简介（进提示词）
     params: dict = field(default_factory=dict)      # 参数名 -> "类型 说明"（"[可选]" 前缀表可选）
     explanation: str = ""           # 详细用法说明（可选，进提示词）
+    present: str = ""               # 结果"呈现方式"指令（可选）：工具结果是**用户要听的内容
+                                    # 本身**（如笑话/故事）而非"待摘要的数据"时填。有它 → 注入
+                                    # [工具结果] 消息时带上，覆盖通用的"不要重复已说过的内容"
+                                    # （笑话要求完整逐字讲，2026-09-19 实测 DeepSeek 把笑话
+                                    # 压成一句评论）。数据类工具（天气/金价）留空走默认。
     timeout: float = 10.0           # 执行超时（秒），防语音流卡死
     max_result: int = 800           # 结果最长字符，防爆上下文
     fn: Optional[Callable[[dict], str]] = None
@@ -83,6 +88,7 @@ def tool(name: str, description: str, params: dict = None, **kwargs):
     if params is None:
         params = {k: v for k, v in kwargs.items() if k not in _RESERVED}
     explanation = kwargs.get("explanation", "")
+    present = kwargs.get("present", "")
     timeout = kwargs.get("timeout", 10.0)
     max_result = kwargs.get("max_result", 800)
 
@@ -92,6 +98,7 @@ def tool(name: str, description: str, params: dict = None, **kwargs):
             description=description,
             params=params,
             explanation=explanation,
+            present=present,
             timeout=timeout,
             max_result=max_result,
             fn=fn,

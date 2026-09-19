@@ -273,6 +273,9 @@ class DialogueController:
             lines.append("  " + t.to_prompt_doc())
             if t.explanation:
                 lines.append("    " + t.explanation)
+            if t.present:
+                # 结果"呈现方式"指令（如笑话要完整逐字讲）：提前告知，收到结果后按它呈现
+                lines.append("    [呈现要求] " + t.present)
         lines.append("- 每轮对话都可以调用工具，且可以随时再次调用：用户追问新日期/新城市等"
                      "此前结果没覆盖的信息时，重新调用对应工具获取，不要用旧结果硬答，"
                      "也不要说\"没有数据/查不到\"——先调用工具试试。")
@@ -703,9 +706,17 @@ class DialogueController:
                             pending.append(self._run_tool(c))
                 if not pending:
                     break                            # 没调工具 = 单轮 = 旧行为
+                # 呈现要求：本轮调用的工具里带 present（如笑话"完整逐字讲"）→ 覆盖通用
+                # "不要重复已说过的内容"（那条是防数据工具复述摘要，对笑话是反效果——
+                # 2026-09-19 实测 DeepSeek 把笑话原文压成一句评论"这个太损了…"）。"不要
+                # 编造"对所有工具保留（笑话也不许另编）。
+                presents = [t.present for c in calls
+                            if (t := self._tools.get(c.name)) is not None and t.present]
                 msg = ("[工具结果]\n以下为工具返回的权威数据，据此直接回答用户、一次说清即可："
-                       "不要重复已说过的内容，不要编造数据里没有的数字。\n"
-                       + "\n".join(pending))
+                       "不要编造数据里没有的数字。")
+                msg += (" 呈现要求：%s。" % "；".join(dict.fromkeys(presents)).rstrip("。")
+                        if presents else " 不要重复已说过的内容。")
+                msg += "\n" + "\n".join(pending)
                 if round_no >= max_rounds:
                     # 到轮数上限：最后一批工具结果仍回灌进历史（工具已执行、侧效应已发生），
                     # 但不再起新的 LLM 轮（防工具无限循环）。

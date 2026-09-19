@@ -87,11 +87,15 @@ class Tool:
     description: str             # 一行简介（进提示词）
     params: dict[str, str]       # 参数名 -> "类型 说明"（"[可选]" 后缀表可选）
     explanation: str = ""        # 详细用法说明（可选，进提示词）
+    present: str = ""            # 结果"呈现方式"指令（可选）：结果是**用户要听的内容本身**
+                                 # （笑话/故事）而非"待摘要的数据"时填 → [工具结果] 注入带它、
+                                 # 覆盖通用"不要复述"，强制模型完整逐字讲（2026-09-19 实测
+                                 # DeepSeek 把笑话压成一句评论）。数据类工具留空走默认。
     timeout: float = 10.0        # 执行超时（防语音流卡死）
     max_result: int = 800        # 结果最长字符（防爆上下文）
     fn: Callable[[dict], str]    # params -> 结果字符串（必须快、纯函数优先）
 
-@tool(name, description, params_dict, explanation=..., timeout=..., max_result=...)  # 装饰器
+@tool(name, description, params_dict, explanation=..., present=..., timeout=..., max_result=...)  # 装饰器
 ```
 
 ```python
@@ -128,6 +132,11 @@ def get_weather(params: dict) -> str:
 - 补充（2026-09-16 重复回答实测）：工具结果注入消息与 system 都声明「结果里的数据是**权威
   事实**，据此**一次说清**，不要重复/复述，不要编造数据里没有的数字」——曾实测 DeepSeek 在
   单次输出里重复回答两版且自相矛盾（30/23 有小雨 vs 30/22 不下雨，后者是臆造）。
+- **`present` 例外（2026-09-19 笑话实测补）**：带 `present` 的工具（`get_soviet_joke`）结果
+  **不是"待摘要的数据"而是"用户要听的内容本身"**——「不要重复/复述」对它反效果（实测
+  DeepSeek 把笑话原文压成一句评论"这个太损了…"）。注入消息里改带该工具的呈现要求（完整
+  逐字讲、可加一句过渡、不许另编），并覆盖通用「不要重复」；「不要编造」对所有工具保留。
+  `_tools_prompt` 的工具文档同步显示 `[呈现要求]` 行，模型调用前就知道该工具的结果要照搬。
 ```
 
 ### 5.3 XML 流式解析器 —— `dialogue/toolparse.py`
@@ -280,6 +289,7 @@ sequenceDiagram
 | `get_time` | 当前日期时间（含星期） | 零网络，本地 |
 | `get_weather` | 城市天气（复用 assistant/ 的 qweather 配置直接 HTTP 调，**不走 MCP** 更轻）；默认取整周 7 天，可指定城市 / days=3 或 7 | 需要 qweather key（可配） |
 | `get_gold_history` | 金价（复用 assistant/gold 数据管线直接 HTTP 调，**不走 MCP** 更轻）：国内沪金 AU0 全历史统计 + 国际现货金实时对照；周期 1m/6m/1y/2y/5y/all，market=au9999(默认)/xauusd；含免责声明 | 零 key（新浪免费源，30h 缓存） |
+| `get_soviet_joke` | 苏联笑话（复用 assistant 的 soviet-joke skill 语料读 corpus.md 挑一条，**不走 MCP**）：1975《苏联东欧政治笑话选编》历史语料 77 条，逐字引用不改造；镜像 tell.py 格式不变量（主题剥 `X、` 序号 / 正文逐字 / 末尾无空行）；theme=一/二/三/四 或关键词按主题挑，avoid=<上一条《》标题> 避让防"再来一个"重复 | 零网络，本地语料 |
 
 其余（搜索/技能/文件）以"丢 py 文件进 `tool/`"即插，一期不内置。
 
@@ -292,6 +302,7 @@ sequenceDiagram
 | `tool/time_tool.py` | 首批示例：`get_time` |
 | `tool/weather.py` | 首批示例：`get_weather`（qweather HTTP，复用 assistant/qweather 技能） |
 | `tool/gold.py` | `get_gold_history`（复用 assistant/gold 数据管线，参照 soviet-joke 模式：确定性逻辑全在数据脚本，Tool 只薄封装不造数） |
+| `tool/soviet_joke.py` | `get_soviet_joke`（复用 soviet-joke skill 语料 corpus.md，镜像 tell.py 格式不变量，theme/avoid 参数） |
 | `dialogue/toolparse.py` | XML 流式解析器（Alife 移植，feed→(clean,calls)） |
 | `dialogue/controller.py` | `_llm_loop` 多轮循环 + 工具执行 + 结果回灌 + 过渡句先出声 + `_TAG_RE` |
 | `examples/voice_dialogue.py` | `--tools` / `--tools-max-rounds` / `--tools-timeout` 参数 + 加载与 `on_tool` 诊断行 |
@@ -309,6 +320,8 @@ sequenceDiagram
    - "现在几点" → 单轮 get_time，过渡句立即出声，答案随后；
    - "北京今天天气怎么样" → 过渡句出声 + get_weather + 最终答案；
    - "最近金价怎么样/黄金走势" → 过渡句出声 + get_gold_history + 最终答案（含免责声明）；
+   - "讲个苏联笑话" → 过渡句出声 + get_soviet_joke + 最终答案逐字引用；"再来一个" → 模型带
+     avoid=<上一条标题> 再调不重复；
    - 不触发工具的普通问答 → 与不开 `--tools` 同样快（单轮）；
    - 打断"停下" / 新句 barge-in → 在途工具续轮作废；
    - 心态标记/存档/live2d 正常。
