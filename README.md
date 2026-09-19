@@ -41,7 +41,8 @@ python bench/bench_asr.py --backend paraformer --device cuda --tag my     # 验�
 - 文本输入源（调试，默认关）：`--text-input-port` + `examples/text_input.py`，与麦克风并存——见
   docs/voice-dialogue.md「文本输入源」。
 - LLM 模式工具（默认关，仅 `--brain llm`）：`--tools all` —— XML 内联工具调用（get_time /
-  get_weather），保住 0.5s 首 token 的速度；工具包在仓库根 `tool/`，新增工具=丢一个 py 文件——见
+  get_weather / get_gold_history），保住 0.5s 首 token 的速度；工具包在仓库根 `tool/`，
+  新增工具=丢一个 py 文件——见
   [`docs/llm-tools.md`](docs/llm-tools.md)。
 - LLM 引擎扩展（DeepSeek/llmx 之外换引擎怎么做）：见 [`docs/EXTENDING-BACKENDS.md`](docs/EXTENDING-BACKENDS.md)。
 

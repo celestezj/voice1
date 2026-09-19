@@ -203,6 +203,7 @@ def get_weather(params: dict) -> str:
 | `max_result` | 800 字 | 结果截断（单工具可调） |
 | 异常 | — | 工具抛异常 → 回灌 `[工具错误: 原因]`，让模型优雅回应 |
 | 结果角色 | user | 与 Alife 一致（XML 方案不用原生 tool_calls，不能用 role=tool） |
+| 网络代理 | 绕过系统代理直连 | 代码**不写死代理地址**；`load_tools()` 时若**未显式配置** `HTTP_PROXY`/`HTTPS_PROXY` → 设 `NO_PROXY=*` 绕开 Windows 注册表系统代理直连（金价/天气等国内源可达，系统代理进程没跑也不会连不上）；**显式配置了代理环境变量 → 尊重代理**。想走代理就设 `HTTP_PROXY`/`HTTPS_PROXY` 再起程序 |
 
 ### 5.7 多轮流时序图（链条式工具调用）
 
@@ -278,6 +279,7 @@ sequenceDiagram
 |---|---|---|
 | `get_time` | 当前日期时间（含星期） | 零网络，本地 |
 | `get_weather` | 城市天气（复用 assistant/ 的 qweather 配置直接 HTTP 调，**不走 MCP** 更轻）；默认取整周 7 天，可指定城市 / days=3 或 7 | 需要 qweather key（可配） |
+| `get_gold_history` | 金价（复用 assistant/gold 数据管线直接 HTTP 调，**不走 MCP** 更轻）：国内沪金 AU0 全历史统计 + 国际现货金实时对照；周期 1m/6m/1y/2y/5y/all，market=au9999(默认)/xauusd；含免责声明 | 零 key（新浪免费源，30h 缓存） |
 
 其余（搜索/技能/文件）以"丢 py 文件进 `tool/`"即插，一期不内置。
 
@@ -289,6 +291,7 @@ sequenceDiagram
 | `tool/base.py` | `Tool` / `@tool` / 执行超时守卫 + 结果截断 |
 | `tool/time_tool.py` | 首批示例：`get_time` |
 | `tool/weather.py` | 首批示例：`get_weather`（qweather HTTP，复用 assistant/qweather 技能） |
+| `tool/gold.py` | `get_gold_history`（复用 assistant/gold 数据管线，参照 soviet-joke 模式：确定性逻辑全在数据脚本，Tool 只薄封装不造数） |
 | `dialogue/toolparse.py` | XML 流式解析器（Alife 移植，feed→(clean,calls)） |
 | `dialogue/controller.py` | `_llm_loop` 多轮循环 + 工具执行 + 结果回灌 + 过渡句先出声 + `_TAG_RE` |
 | `examples/voice_dialogue.py` | `--tools` / `--tools-max-rounds` / `--tools-timeout` 参数 + 加载与 `on_tool` 诊断行 |
@@ -305,6 +308,7 @@ sequenceDiagram
    --tools all ...`：
    - "现在几点" → 单轮 get_time，过渡句立即出声，答案随后；
    - "北京今天天气怎么样" → 过渡句出声 + get_weather + 最终答案；
+   - "最近金价怎么样/黄金走势" → 过渡句出声 + get_gold_history + 最终答案（含免责声明）；
    - 不触发工具的普通问答 → 与不开 `--tools` 同样快（单轮）；
    - 打断"停下" / 新句 barge-in → 在途工具续轮作废；
    - 心态标记/存档/live2d 正常。

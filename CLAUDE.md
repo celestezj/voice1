@@ -145,7 +145,13 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   不在语气词切句，工具标签捕获瞬间须显式把累积缓冲送 TTS，否则工具执行期用户听不到声音。
   参数 `--tools-max-rounds`（默认 3，防无限循环）/ `--tools-timeout`（覆盖默认超时）。
   第一批工具：`get_time`（零网络）/ `get_weather`（复用 assistant/qweather 技能直接
-  HTTP 调，不走 MCP；**默认取整周 7 天**）。**追问自动重查**：提示词明确"每轮都可调用、
+  HTTP 调，不走 MCP；**默认取整周 7 天**）/ `get_gold_history`（复用 assistant/gold
+  数据管线直接 HTTP 调，不走 MCP；国内沪金 AU0 全历史统计 + 国际现货金实时，含免责声明；
+  参照 soviet-joke 模式——确定性逻辑全在数据脚本，Tool 只薄封装不造数）。
+  **工具包网络策略**：代码**不写死代理地址**；`load_tools()` 未显式配置 HTTP_PROXY/HTTPS_PROXY
+  → 自动 `NO_PROXY=*` 绕过 Windows 系统代理直连（Clash 没开也能查国内源）；显式配了则尊重。
+  **追问自动重查**：
+  提示词明确"每轮都可调用、
   随时可再次调用"——用户追问新日期/新城市等旧结果没覆盖的信息时模型会重新调用工具，不
   硬答旧数据。**结果权威一次说清**：`[工具结果]` 注入消息与 system 都声明结果是权威事实、
   一次回答、不重复不编造（防单次输出重复两版自相矛盾，2026-09-16 实测）。
@@ -436,7 +442,8 @@ dialogue/        语音对话子程序：llm.py（OpenAI 兼容 SSE 客户端 + 
                  config.local.json（机密 API key，gitignored，绝不提交）
 tool/            LLM 模式工具包（--tools，docs/llm-tools.md）：base.py（Tool/@tool/超时守卫）+
                  __init__.py（pkgutil 自动扫描，新增工具=丢一个 py 文件零改码）+
-                 time_tool.py（get_time 零网络）+ weather.py（get_weather 复用 qweather 技能）
+                 time_tool.py（get_time 零网络）+ weather.py（get_weather 复用 qweather 技能）+
+                 gold.py（get_gold_history 复用 assistant/gold 数据管线，参照 soviet-joke 模式）
 assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力；
                  独立 git 子模块（GitHub 私有仓库，凭据不入库），设计目标/目录结构见 docs/voice-dialogue.md「assistant/ 目录」节
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）

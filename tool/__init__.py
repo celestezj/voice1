@@ -11,12 +11,28 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import pkgutil
 import sys
 
 from .base import Tool, tool  # noqa: F401  工具模块统一从这里拿
 
 log = logging.getLogger("tools")
+
+
+def apply_network_policy():
+    """工具包网络策略（2026-09-18，用户实测）：本机 Windows 系统代理（Clash 之类）配置了
+    但进程不在跑时，`requests` 读注册表代理会连不上国内源（新浪金价/和风天气）——这是
+    `requests` 默认 `trust_env=True` 的行为，代码里**没有写死任何代理地址**。
+    处理：**未显式配置 HTTP_PROXY/HTTPS_PROXY → 设 `NO_PROXY=*` 绕过系统代理直连**
+    （金价/天气都是国内可达源，直连更稳）；**显式配置了代理 → 尊重代理**（用户网络环境
+    需要走代理时，设 HTTP_PROXY/HTTPS_PROXY 环境变量即可）。`load_tools()` 加载时执行一次，
+    对进程内后续全部 requests 生效。
+    """
+    if not (os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("http_proxy") or os.environ.get("https_proxy")):
+        os.environ.setdefault("NO_PROXY", "*")
+        os.environ.setdefault("no_proxy", "*")
 
 
 def _scan_module(modname: str) -> list:
@@ -41,6 +57,7 @@ def load_tools(names=None, logger=None) -> dict:
     logger: 可选的诊断打印对象（print 到控制台），None 则不打。
     """
     glog = logger or log.info
+    apply_network_policy()          # 未配置代理 → NO_PROXY=* 绕注册表系统代理直连
     found = {}
     for _, modname, _ in pkgutil.iter_modules(__path__):
         for t in _scan_module(modname):
