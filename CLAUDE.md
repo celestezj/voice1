@@ -147,6 +147,17 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `@tool` 装饰器 + 包内自动扫描，**新增工具=丢一个 py 文件零改码**）；结果回灌成
   `[工具结果]` user 消息 → 第二轮流式出最终答案。**过渡句先出声**：LLM 路径 `_find_cut`
   不在语气词切句，工具标签捕获瞬间须显式把累积缓冲送 TTS，否则工具执行期用户听不到声音。
+  **结果回灌轮不重复过渡**（2026-09-19 笑话实测两段过渡）：调用前过渡句已出声，模型拿到
+  `[工具结果]` 又自己开场一遍（"好呀…给你讲一个"+"阿阳想听笑话呀…"两段重复）。**根因是
+  续轮上下文漏喂**：`_llm_loop` 第 2 轮发给 LLM 的只有 `[工具结果]` user 消息、没有第 1 轮
+  助手正文——模型不知道过渡句是自己说的，纯"别重复"禁令拦不住（实测 DeepSeek 照样重开）。
+  修法（OpenAI 工具轮同款协议）：续轮前把 `round1_assistant = _assistant_full.strip()` 作为
+  `assistant` 消息 append 进 messages（在 `[工具结果]` user 消息之前）——模型看见自己已开过
+  场，拿到结果直接续正文；纯 `<get_time/>` 无正文不加空 assistant 消息。保留按轮记的
+  `pre_transition` 提示词（调用前 `_assistant_full` 是否增量，真吐过正文才在结果消息注入
+  "直接开始说内容，别再重复一遍开场过渡"）作双保险；纯标签轮不注入、模型照常开头。笑话工具
+  present 不再写"可开头加一句过渡"（调用前已说过，直接进正文）。**写新"工具续轮/多轮"逻辑
+  记得：续轮必须带上轮助手正文当 assistant 消息**，否则模型重开场/重复内容。
   参数 `--tools-max-rounds`（默认 3，防无限循环）/ `--tools-timeout`（覆盖默认超时）。
   第一批工具：`get_time`（零网络）/ `get_weather`（复用 assistant/qweather 技能直接
   HTTP 调，不走 MCP；**默认取整周 7 天**）/ `get_gold_history`（复用 assistant/gold

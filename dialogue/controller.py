@@ -669,6 +669,9 @@ class DialogueController:
                 if parser is not None:
                     parser.reset()                   # 每轮全新生成，标签不跨轮
                 pending = []                         # 本轮捕获的工具结果（回灌文本）
+                round_full0 = len(self._assistant_full)  # 本轮开头正文长度：工具调用前是否已吐
+                                                         # 过正文（判定"调用前已说过渡"）
+                pre_transition = False                  # 本轮工具调用前模型吐过正文 → 过渡句已出声
                 for delta in self._llm.stream_chat(messages):
                     if gen != self._gen:             # 已被更新请求取代 → 弃流（生成器 close 关连接）
                         return
@@ -689,6 +692,11 @@ class DialogueController:
                         self._on_ai_delta(delta, buf)
                     self._emit_sentences(gen)
                     if calls:
+                        # 本轮工具调用前模型已吐过正文（可能已切句出声，或整段在缓冲里即将送
+                        # 出）→ 过渡句已/将被用户听到。结果回灌轮据此注入"不重复开场过渡"。
+                        # 此刻判（而非回灌时判）：_assistant_full 之后还会继续累加本轮后续文本。
+                        if len(self._assistant_full) > round_full0:
+                            pre_transition = True
                         # 工具调用前的过渡句先出声：_find_cut 只切句末标点，过渡句
                         # （"好的我来查一下"）无边界会滞留到最终答案才播——工具执行期
                         # 用户干等。此处把累积缓冲整段送出，TTS 开播后再跑工具。
@@ -714,6 +722,12 @@ class DialogueController:
                             if (t := self._tools.get(c.name)) is not None and t.present]
                 msg = ("[工具结果]\n以下为工具返回的权威数据，据此直接回答用户、一次说清即可："
                        "不要编造数据里没有的数字。")
+                if pre_transition:
+                    # 调用前过渡句已出声（用户听得到），回灌轮别再重复开场（2026-09-19 笑话
+                    # 实测"好呀…给你讲一个"+"阿阳想听笑话呀…"两段过渡）。只对"调用前真吐过
+                    # 正文"的轮加——纯 `<get_time/>` 无过渡时不注入，模型照常自己开头。
+                    msg += (" 调用工具前你已经说过一句过渡语了——拿到结果后**直接开始说内容**，"
+                            "不要再重复一遍开场过渡（如“我查一下”“我给你讲一个”）。")
                 msg += (" 呈现要求：%s。" % "；".join(dict.fromkeys(presents)).rstrip("。")
                         if presents else " 不要重复已说过的内容。")
                 msg += "\n" + "\n".join(pending)
@@ -733,6 +747,15 @@ class DialogueController:
                     if gen != self._gen:
                         return
                     self._tool_results_inflight.append(msg)
+                    round1_assistant = self._assistant_full.strip()
+                # 续轮上下文：把本轮助手正文作为 assistant 消息喂给下一轮（OpenAI 工具轮同款
+                # 协议：assistant 过渡 → user 工具结果 → assistant 直接续正文）。模型必须看
+                # 到自己调用工具前已说过的过渡句——否则它不知道、拿到结果后又自己开场一遍
+                # （2026-09-19 实测"我给你讲个苏联笑话"+"来 给你讲个苏联笑话"两段过渡，
+                # 纯提示词禁令拦不住：模型眼里的对话只有 question → [工具结果]，它不认为
+                # 自己开过场）。纯 `<get_time/>` 无正文时不加空 assistant 消息。
+                if round1_assistant:
+                    messages.append({"role": "assistant", "content": round1_assistant})
                 messages.append({"role": "user", "content": msg})
             # 流正常结束 → 记录本次上下文的精确 token 用量（压缩触发依据）
             usage = getattr(self._llm, "last_usage", None)
