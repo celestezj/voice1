@@ -29,6 +29,7 @@ agent 模式的大脑：controller 把 ASR 文本交给它，它把 agent 的**�
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -62,6 +63,154 @@ _DEFAULT_PERSONA_FILE = "CLAUDE.md"        # 人格文件（人格唯一事实�
 _DEFAULT_SESSION_FILE = os.path.join(      # session_id 落盘（--agent-resume 续会话用）
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "sessions", "agent_session_id.txt")
+
+
+def _resolve_mcp_config(cwd, disable_mcp=False):
+    """组装要挂给 claude 会话的 MCP server 配置（挂载与启动期探测共用同一套解析）。
+
+    默认源 = <agent 目录>/.mcp.json（与 Claude Code 同一套配置），新增 MCP 往里加一段即可，
+    无需改代码/加参数。`--no-mcp`（disable_mcp=True）则整个 MCP 功能都不挂。`command` 若是
+    python/python3/pythonw/py 统一换成跑本 agent 的 python（voice-asr），避免 Windows 上
+    conda/base 串包；非 python 命令（node 等）相对路径视为相对 agent 目录，转绝对路径。
+    """
+    if disable_mcp:
+        return None
+    cfg_path = os.path.join(cwd, ".mcp.json")   # 例：assistant/.mcp.json
+    raw = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                raw = json.load(f).get("mcpServers", {}) or {}
+        except Exception as e:
+            print("[agent] 读取 MCP 配置失败 %s：%s" % (cfg_path, e), flush=True)
+    selected = {}
+    for name, cfg in (raw or {}).items():
+        cfg = dict(cfg)
+        cmd = (cfg.get("command") or "").strip().lower()
+        if cmd in ("python", "python3", "pythonw", "py"):
+            cfg["command"] = sys.executable
+        else:
+            # 非 python 命令：相对路径视为相对 agent 目录（与 args 同），写成绝对路径，
+            # 跟启动目录解耦——如 `python -m search_mcp` 的 search MCP 是独立 venv
+            # （.venv-search）里的 python，不能换成本 agent 的 python，command 须写
+            # `.venv-search/Scripts/python.exe` 这种相对路径再转绝对。
+            c = cfg.get("command") or ""
+            if c and not os.path.isabs(c):
+                cfg["command"] = os.path.abspath(os.path.join(cwd, c))
+        # 相对 args 视为相对 agent 目录（.mcp.json 所在处），写成绝对路径，跟启动目录解耦
+        # （防从别处 `python voice_dialogue.py` 时 MCP 子进程找不到脚本）。
+        # `-m <模块名>` 形态：`-m` 之后的参数是模块名（如 `-m search_mcp`），不是文件路径，
+        # 保持原样——否则会被误当成相对路径转绝对（实测 search MCP 挂载失败根因）。
+        args = cfg.get("args") or []
+        out = []
+        module_next = False
+        for a in args:
+            if module_next:
+                module_next = False
+                out.append(a)
+            elif a == "-m":
+                module_next = True
+                out.append(a)
+            else:
+                out.append(os.path.abspath(os.path.join(cwd, a))
+                           if a and not os.path.isabs(a) and not a.startswith("-") else a)
+        cfg["args"] = out
+        selected[name] = cfg
+    return selected or None
+
+
+def _read_skill_frontmatter(path):
+    """读 SKILL.md 的 `---` frontmatter → dict（yaml 兜底解析失败返回 {}）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return {}
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.S)
+    if not m:
+        return {}
+    try:
+        import yaml
+        data = yaml.safe_load(m.group(1))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def list_skills(cwd=None):
+    """扫 <agent 目录>/.claude/skills/*/SKILL.md，返回 [(name, description), ...]。
+
+    启动期展示 agent 有哪些技能（agent 模式专用）：claude 标准技能发现位置是
+    `<cwd>/.claude/skills/`，每个技能一个子目录，SKILL.md 前端 `name`/`description`。
+    """
+    base = os.path.join(cwd or _DEFAULT_AGENT_DIR, ".claude", "skills")
+    skills = []
+    if os.path.isdir(base):
+        for entry in sorted(os.listdir(base)):
+            md = os.path.join(base, entry, "SKILL.md")
+            if not os.path.isfile(md):
+                continue
+            fm = _read_skill_frontmatter(md)
+            name = (fm.get("name") or entry).strip()
+            desc = (fm.get("description") or "").strip()
+            if name:
+                skills.append((name, desc))
+    return skills
+
+
+def probe_mcp_tools(cwd=None, disable_mcp=False, timeout=8.0, logger=None):
+    """启动期探测：对 <agent 目录>/.mcp.json 每个 server 连一次、枚举实际工具名后即断。
+
+    返回 {server名: [工具名, ...]}。单个 server 连接/枚举失败 → 该 server 记为 []（记
+    logger 提示，不拖垮其他）；`--no-mcp`/无配置 → {}。纯展示用（实际挂载由 claude SDK
+    连，这里只是启动期列清单）。
+    """
+    glog = logger or (lambda m: None)
+    servers = _resolve_mcp_config(cwd or _DEFAULT_AGENT_DIR, disable_mcp)
+    if not servers:
+        return {}
+
+    out = {}
+    import asyncio
+
+    async def _probe_one(name, cfg):
+        try:
+            from mcp import StdioServerParameters
+            from mcp.client.session import ClientSession
+            if "url" in cfg:
+                from mcp.client.streamable_http import streamable_http_client
+                async with streamable_http_client(cfg["url"]) as (r, w):
+                    async with ClientSession(r, w) as session:
+                        await session.initialize()
+                        listed = await session.list_tools()
+                        return [getattr(t, "name", "") for t in listed.tools]
+            else:
+                from mcp.client.stdio import stdio_client
+                params = StdioServerParameters(command=cfg["command"], args=cfg.get("args") or [],
+                                               env=cfg.get("env"))
+                async with stdio_client(params) as (r, w):
+                    async with ClientSession(r, w) as session:
+                        await session.initialize()
+                        listed = await session.list_tools()
+                        return [getattr(t, "name", "") for t in listed.tools]
+        except Exception as e:
+            glog("[agent] MCP server %r 探测失败：%s" % (name, e))
+            return []
+
+    async def _run():
+        for name, cfg in servers.items():
+            try:
+                tools = await asyncio.wait_for(_probe_one(name, cfg), timeout=timeout)
+                out[name] = sorted(t for t in tools if t)
+            except asyncio.TimeoutError:
+                glog("[agent] MCP server %r 探测超时（>%ss），跳过" % (name, timeout))
+                out[name] = []
+
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        glog("[agent] MCP 探测异常：%s" % e)
+    return out
 
 
 class ClaudeAgentClient:
@@ -187,59 +336,12 @@ class ClaudeAgentClient:
                 pass
 
     def _build_mcp_servers(self):
-        """组装要挂给 claude 会话的 MCP server 配置。
-
-        默认源 = <agent 目录>/.mcp.json（与 Claude Code 同一套配置），新增 MCP 往里加一段即可，
-        无需改代码/加参数；要只关某一个，直接删 .mcp.json 里那段。`--no-mcp`（disable_mcp=True）
-        则整个 MCP 功能都不挂。`command` 若是 python/python3/pythonw/py 统一换成跑本 agent 的
-        python（voice-asr），避免 Windows 上 conda/base 串包；非 python 命令（node 等）原样保留。
-        """
-        if self._disable_mcp:
-            return None
-        cfg_path = os.path.join(self._cwd, ".mcp.json")   # 例：assistant/.mcp.json
-        raw = {}
-        if os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, encoding="utf-8") as f:
-                    raw = json.load(f).get("mcpServers", {}) or {}
-            except Exception as e:
-                print("[agent] 读取 MCP 配置失败 %s：%s" % (cfg_path, e), flush=True)
-        selected = {}
-        for name, cfg in (raw or {}).items():
-            cfg = dict(cfg)
-            cmd = (cfg.get("command") or "").strip().lower()
-            if cmd in ("python", "python3", "pythonw", "py"):
-                cfg["command"] = sys.executable
-            else:
-                # 非 python 命令：相对路径视为相对 agent 目录（与 args 同），写成绝对路径，
-                # 跟启动目录解耦——如 `python -m search_mcp` 的 search MCP 是独立 venv
-                # （.venv-search）里的 python，不能换成本 agent 的 python，command 须写
-                # `.venv-search/Scripts/python.exe` 这种相对路径再转绝对。
-                c = cfg.get("command") or ""
-                if c and not os.path.isabs(c):
-                    cfg["command"] = os.path.abspath(os.path.join(self._cwd, c))
-            # 相对 args 视为相对 agent 目录（.mcp.json 所在处），写成绝对路径，跟启动目录解耦
-            # （防从别处 `python voice_dialogue.py` 时 MCP 子进程找不到脚本）。
-            # `-m <模块名>` 形态：`-m` 之后的参数是模块名（如 `-m search_mcp`），不是文件路径，
-            # 保持原样——否则会被误当成相对路径转绝对（实测 search MCP 挂载失败根因）。
-            args = cfg.get("args") or []
-            out = []
-            module_next = False
-            for a in args:
-                if module_next:
-                    module_next = False
-                    out.append(a)
-                elif a == "-m":
-                    module_next = True
-                    out.append(a)
-                else:
-                    out.append(os.path.abspath(os.path.join(self._cwd, a))
-                               if a and not os.path.isabs(a) and not a.startswith("-") else a)
-            cfg["args"] = out
-            selected[name] = cfg
+        """组装要挂给 claude 会话的 MCP server 配置（路径解析共用模块级 _resolve_mcp_config，
+        与启动期探测 probe_mcp_tools 同一套逻辑）。"""
+        selected = _resolve_mcp_config(self._cwd, self._disable_mcp)
         if self._debug:
             print("[agent] MCP servers: %s" % (", ".join(selected) or "（无）"), flush=True)
-        return selected or None
+        return selected
 
     async def _connect(self):
         persona = self._load_persona()

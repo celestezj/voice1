@@ -200,6 +200,13 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   "这个太损了…"）；「不要编造」对所有工具保留。写新"结果即内容"类工具（故事/段子）记得设
   `present=`，数据类工具（天气/金价）留空走默认。
   headless 测试 `tmp/test_llm_tools.py`。完整设计见 `docs/llm-tools.md`。
+  **启动期工具清单（2026-09-25）**：LLM 模式启动打印 `[tools] 已加载（…）：` + 分组清单
+  （`_describe_tools`：本地 `@tool` 一组、MCP 转换工具一组，逐条 `名字 — 描述`）；**不传
+  `--tools`** 打一行 `[tools] 未启用工具调用`（本次纯 LLM 问答）——一眼分清"没开"还是
+  "没工具"。agent 模式启动打印 `[agent] MCP 工具`（`probe_mcp_tools` 短暂连接枚举
+  `assistant/.mcp.json` 实际工具名后即断）+ `[agent] skills`（`list_skills` 扫
+  `.claude/skills/*/SKILL.md`）；挂载与探测共用 `_resolve_mcp_config`。headless 验证
+  `tmp/test_startup_listing.py`。
 - **机密**：DeepSeek API key 只放 `dialogue/config.local.json`（`.gitignore` 已排除，
   **绝不提交/绝不外传**）；读取优先级 显式参数 > `--llm-config` 指定文件 > 默认
   `config.local.json` > 环境变量 `DEEPSEEK_API_KEY`（`--llm-config` 可换整份配置）。
@@ -208,7 +215,9 @@ voice0 仓库地址：https://github.com/celestezj/voice0
 - **agent 大脑（可选）**：`--brain agent` 把大脑换成**本地 claude code 常驻会话**
   （`dialogue/agent.py` `ClaudeAgentClient`，claude-agent-sdk）——旁路自实现历史/压缩/
   系统提示词（上下文在 claude 会话，人格=`assistant/CLAUDE.md` 显式传 system_prompt，
-  SDK 实测不自动加载 cwd 的 CLAUDE.md）；「停下」=ESC（abort 不 kill 进程，不进上下文）；
+  SDK 实测不自动加载 cwd 的 CLAUDE.md）；**启动打能力清单**：`[agent] MCP 工具`
+  （`probe_mcp_tools` 短暂连接枚举 `assistant/.mcp.json` 实际工具名）+ `[agent] skills`
+  （`list_skills` 扫 `.claude/skills/*/SKILL.md`）；「停下」=ESC（abort 不 kill 进程，不进上下文）；
   敏感操作走 `【询问】` 语音确认（`_ASK_RE` 送 TTS 剥掉不念）；工具权限默认放行
   `PowerShell/Bash/Read/Write/Edit/Glob/Grep/WebFetch/WebSearch/Skill`（`agent.py`
   `_DEFAULT_ALLOWED_TOOLS`，SDK 无终端须预放行技能才能跑；**Windows 两个 shell 都能跑**——

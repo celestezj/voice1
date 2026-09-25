@@ -259,6 +259,29 @@ def _list_vits_voices():
                 print(line, flush=True)
 
 
+def _describe_tools(tools):
+    """把 {name: Tool} 整理成 [本地]/[MCP] 两组的描述文本（工具名 + 一句说明）。
+
+    MCP 工具是 tool/mcp_bridge.py 枚举转换的（暴露名 `<server>_<工具名>`），本地工具是
+    tool/ 里 @tool 注册的——按是否在 mcp_bridge._tools 里分组，启动清单一眼分清来源。
+    """
+    try:
+        from tool import mcp_bridge
+        mcp_names = set(mcp_bridge._tools)
+    except Exception:
+        mcp_names = set()
+    local = sorted(n for n in tools if n not in mcp_names)
+    mcp = sorted(n for n in tools if n in mcp_names)
+    lines = []
+    if local:
+        lines.append("[tools]   本地工具：")
+        lines += ["[tools]     %s — %s" % (n, (tools[n].description or "").strip()) for n in local]
+    if mcp:
+        lines.append("[tools]   MCP 工具（tool/mcp.local.json 转换）：")
+        lines += ["[tools]     %s — %s" % (n, (tools[n].description or "").strip()) for n in mcp]
+    return "\n".join(lines)
+
+
 def _list_moss_voices():
     """--tts-list-voices：打印 voice0 moss 内置音色清单（读 manifest，无需加载模型）。"""
     import json
@@ -497,6 +520,35 @@ def main():
               % (agent_dir, "，续上次会话" if args.agent_resume else "，新会话",
                  "，流式增量也送 TTS（结论到达打断重播）" if args.agent_stream_tts else ""),
               flush=True)
+        # 启动期能力清单：MCP 实际工具名（短暂连接枚举后即断）+ skills 技能
+        # 工具名来自 .mcp.json 各 server 的 list_tools（claude SDK 运行时自己再连，这里
+        # 只是启动列清单；--no-mcp 则不枚举直接提示）。
+        try:
+            from dialogue.agent import probe_mcp_tools, list_skills
+            if args.no_mcp:
+                print("[agent] MCP：--no-mcp 已关（未挂任何 MCP）", flush=True)
+            else:
+                mcp_tools = probe_mcp_tools(agent_dir, disable_mcp=False,
+                                            logger=lambda m: print("[agent] " + m, flush=True))
+                if mcp_tools:
+                    print("[agent] MCP 工具：", flush=True)
+                    for sname in sorted(mcp_tools):
+                        names = mcp_tools[sname]
+                        print("[agent]   %s : %s" % (sname, ", ".join(names) if names else "（无/枚举失败）"),
+                              flush=True)
+                else:
+                    print("[agent] MCP：无（%s 无 .mcp.json 或全部连接失败）"
+                          % os.path.join(agent_dir, ".mcp.json"), flush=True)
+            skills = list_skills(agent_dir)
+            if skills:
+                print("[agent] skills：", flush=True)
+                for name, desc in skills:
+                    one = (desc or "").replace("\n", " ").strip()
+                    print("[agent]   %s : %s" % (name, one), flush=True)
+            else:
+                print("[agent] skills：无（%s/.claude/skills/ 为空）" % agent_dir, flush=True)
+        except Exception as e:
+            print("[agent] 能力清单加载失败（不影响运行）：%s" % e, flush=True)
     else:
         if args.system_prompt:
             with open(args.system_prompt, "r", encoding="utf-8") as f:
@@ -510,21 +562,27 @@ def main():
 
     # ---- LLM 模式工具（--tools，docs/llm-tools.md）：XML 内联调用，仅 --brain llm 生效 ----
     tools = None
-    if args.tools:
-        if args.brain == "agent":
-            print("[tools] --tools 仅 --brain llm 生效；agent 模式忽略（走 claude 原生工具/MCP）",
+    if args.brain == "agent" and args.tools:
+        # agent 模式走 claude 原生工具/MCP，--tools 对其无效——但仍列出实际可用能力
+        # （MCP 工具名 + skills，见下方 agent 分支启动清单）
+        print("[tools] --tools 仅 --brain llm 生效；agent 模式忽略（走 claude 原生工具/MCP）",
+              flush=True)
+    elif args.tools:
+        from tool import load_tools      # tool/ 在仓库根（sys.path 已含 _PROJ）
+        tools = load_tools(args.tools, logger=lambda m: print("[tools] " + m, flush=True))
+        if tools:
+            print("[tools] 已加载（最多 %d 轮/次，超时 %s）："
+                  % (args.tools_max_rounds,
+                     ("%gs" % args.tools_timeout) if args.tools_timeout else "默认"),
                   flush=True)
+            print(_describe_tools(tools), flush=True)     # 本地 + MCP（转换后）全清单
         else:
-            from tool import load_tools      # tool/ 在仓库根（sys.path 已含 _PROJ）
-            tools = load_tools(args.tools, logger=lambda m: print("[tools] " + m, flush=True))
-            if tools:
-                print("[tools] 已加载：%s（最多 %d 轮/次，超时 %s）"
-                      % (", ".join(sorted(tools)), args.tools_max_rounds,
-                         ("%gs" % args.tools_timeout) if args.tools_timeout else "默认"),
-                      flush=True)
-            else:
-                print("[tools] 未加载到任何工具（--tools %s）——本次运行工具能力关闭"
-                      % args.tools, flush=True)
+            print("[tools] 未加载到任何工具（--tools %s）——本次运行工具能力关闭"
+                  % args.tools, flush=True)
+    elif args.brain == "llm":
+        # 未传 --tools（LLM 模式）：明确告知当前**不支持**工具调用，别误以为"有工具没调"
+        print("[tools] 未启用工具调用（本次为纯 LLM 问答）。要开：--tools all|mcp|get_time,... "
+              "（详见 docs/llm-tools.md）", flush=True)
 
     # ---- 引擎 ----
     interrupt_words = [w.strip() for w in args.interrupt_words.split(",") if w.strip()] or None

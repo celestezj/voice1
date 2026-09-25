@@ -129,6 +129,11 @@ PYTHONIOENCODING=utf-8 python examples/voice_dialogue.py --asr-device cuda --tts
 - **权限模式** `--agent-permission-mode`（默认 `default`）：`bypassPermissions`=全放行（危险，
   别乱用）；预允许/拒绝的工具用 `allowed_tools`/`disallowed_tools` 或 assistant 目录配置控制。
 - **agent 能力**：`assistant/.mcp.json` + `assistant/skills/`（骨架已建，按需填 MCP 服务/技能）。
+- **启动期能力清单（2026-09-25）**：`--brain agent` 启动时打印 `[agent] MCP 工具`（对
+  `assistant/.mcp.json` 每个 server **短暂连接枚举实际工具名**后即断——claude SDK 运行时
+  自己再连，这里只是列清单；`--no-mcp` 则提示"已关"）与 `[agent] skills`（扫
+  `assistant/.claude/skills/*/SKILL.md` 的 name/description）。一眼看清 agent 当前有哪些
+  工具/技能，排查"为什么这个能力没有"先看启动清单。
 - 本地会话存档（`sessions/*.json`）agent 模式**仍保留**（审计用，额外带 agent_session_id），
   与 claude 侧会话并存。
 - 控制台同样有流式出字（agent 模式从 partial 增量走）与 `→ LLM 请求中…` / `× LLM 出错`
@@ -496,6 +501,11 @@ sequenceDiagram
   `--tools get_time,mcp` = 混合。支持 `.mcp.json` 风格字段（`disabled` 跳过 / `timeout` 作工具
   超时 / `env` 透传），`command: python` 自动换 `sys.executable`、相对路径按仓库根转绝对。
   完整设计见 `docs/llm-tools.md` §5.8。
+- **启动期工具清单（2026-09-25）**：LLM 模式启动时打印 `[tools] 已加载（…）：` +
+  `_describe_tools` 分组清单——**本地工具**（`tool/` 的 `@tool`）与 **MCP 工具**
+  （`tool/mcp.local.json` 转换，暴露名 `server_工具名`）各占一组，逐条显示 `名字 — 描述`。
+  **不传 `--tools`** 则打印一行 `[tools] 未启用工具调用`（本次为纯 LLM 问答，工具关闭），
+  不会误以为"有工具没调"。agent 模式传 `--tools` 仍提示忽略（agent 走原生工具/MCP）。
 - **参数**：
   - `--tools-max-rounds <n>`（默认 3）：工具续轮上限，防无限循环。
   - `--tools-timeout <秒>`：覆盖单工具默认执行超时（不传用自带，如 get_time=3s /
@@ -782,3 +792,7 @@ A：控制台按 ASR 断句显示多条 `[时间戳]` 行，这是识别层面�
 | `[live2d] 联动就绪 → …` | live2d 桌宠联动已启用：心态→切表情 + 全 TTS 文本→说话框 |
 | `[live2d] 表情联动关闭…` | 启动测活连不上 → 彻底禁用不重试，对话照常只是不联动 |
 | `[live2d] live2d server 连接失败，请检查` | 运行中 live2d 中途退出：继续如常发送，每次失败打印提醒 |
+| `[tools] 未启用工具调用…` | **启动**（LLM 模式未传 `--tools`）：本次纯 LLM 问答、工具关闭 |
+| `[tools] 已加载（…）：` + 本地/MCP 分组清单 | **启动**（LLM 模式传 `--tools`）：列出全部支持的工具（本地 `@tool` + MCP 转换 `server_工具名`，逐条名字—描述） |
+| `[agent] MCP 工具：` + 各 server 工具名 | **启动**（agent 模式）：短暂连接 `assistant/.mcp.json` 枚举实际工具名（`--no-mcp` 则提示已关） |
+| `[agent] skills：` + 技能清单 | **启动**（agent 模式）：列出 `.claude/skills/*/SKILL.md` 的技能名与描述 |

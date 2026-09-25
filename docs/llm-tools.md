@@ -413,6 +413,20 @@ MCP。等价于把「二期 MCP 包装」提前落地。
    - 心态标记/存档/live2d 正常。
 3. **零变化验证**：不传 `--tools` 跑主程序，行为与改动前完全一致。
 
+## 11. 启动期工具清单（2026-09-25）
+
+- **LLM 模式**：启动即打印 `[tools] 已加载（…）：` + 分组清单（`examples/voice_dialogue.py`
+  `_describe_tools`）——**本地工具**（`tool/` 的 `@tool`）与 **MCP 工具**（`tool/mcp.local.json`
+  转换，暴露名 `server_工具名`）各一组，逐条 `名字 — 描述`。**不传 `--tools`** → 打一行
+  `[tools] 未启用工具调用`，明确本次是纯 LLM 问答、工具关闭。
+- **agent 模式**：启动打印 `[agent] MCP 工具`（`dialogue/agent.py` `probe_mcp_tools` 对
+  `assistant/.mcp.json` 每个 server **短暂连接枚举实际工具名**后即断；`--no-mcp` 提示已关）+
+  `[agent] skills`（`list_skills` 扫 `.claude/skills/*/SKILL.md`）。agent 的 MCP 挂载路径解析
+  与探测共用 `_resolve_mcp_config`（`dialogue/agent.py`），两者天然一致。
+- headless 验证：`tmp/test_startup_listing.py`（gitignored）——`_resolve_mcp_config` /
+  `probe_mcp_tools`（真实 MCPServer 枚举 + 坏 server 隔离 + --no-mcp）/ `list_skills`
+  （yaml 折叠多行 description）。
+
 ## 10. 边界与二期
 
 - **与 agent 模式的关系**：两套工具体系**互不混用**——LLM 模式用本方案的 `tool/`
