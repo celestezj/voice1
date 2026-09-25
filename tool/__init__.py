@@ -54,6 +54,9 @@ def load_tools(names=None, logger=None) -> dict:
 
     names: None / "all" / "" = 全部；否则逗号分隔的名字列表，只加载匹配者
     （未匹配到任何工具时打印可加载清单，帮助排查拼写）。
+    **MCP 工具**（tool/mcp.local.json，见 tool/mcp_bridge.py）：`mcp` 是特殊 token——
+    `--tools mcp` = 只加载 MCP 工具；`--tools all`/不传 = 本地 + MCP 全上；
+    `--tools get_time,mcp` = 本地 get_time + 全部 MCP 工具。
     logger: 可选的诊断打印对象（print 到控制台），None 则不打。
     """
     glog = logger or log.info
@@ -64,17 +67,34 @@ def load_tools(names=None, logger=None) -> dict:
             if t.name in found:
                 glog("[tools] 警告：工具名 %s 重复，后者覆盖" % t.name)
             found[t.name] = t
-    if not names or str(names).strip() in ("", "all"):
+    tokens = [n.strip() for n in str(names).split(",") if n.strip()] if names else []
+    want_all = not tokens or str(names).strip() in ("", "all") or "all" in tokens
+    want_mcp = want_all or "mcp" in tokens
+    mcp_tools = {}
+    if want_mcp:
+        try:
+            from . import mcp_bridge
+            mcp_tools = mcp_bridge.load_mcp_tools(logger=glog)
+        except Exception as e:
+            glog("[mcp] MCP 工具桥接加载失败，跳过：%s" % e)
+    if want_all:
         sel = dict(found)
+        sel.update(mcp_tools)
     else:
-        wanted = [n.strip() for n in str(names).split(",") if n.strip()]
         sel = {}
-        for w in wanted:
-            if w in found:
+        for w in tokens:
+            if w in ("all",):
+                continue
+            if w == "mcp":
+                sel.update(mcp_tools)
+            elif w in found:
                 sel[w] = found[w]
+            elif w in mcp_tools:
+                sel[w] = mcp_tools[w]
             else:
-                glog("[tools] 未知工具名：%s（可用：%s）" % (w, ", ".join(sorted(found)) or "无"))
+                glog("[tools] 未知工具名：%s（可用：%s）" % (
+                    w, ", ".join(sorted(set(found) | set(mcp_tools))) or "无"))
     if logger:
         logger("[tools] 已加载 %d/%d 个工具：%s" % (
-            len(sel), len(found), ", ".join(sorted(sel)) or "无"))
+            len(sel), len(found) + len(mcp_tools), ", ".join(sorted(sel)) or "无"))
     return sel

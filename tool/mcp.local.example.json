@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "search": {
+      "command": "C:/path/to/.venv-search/Scripts/python.exe",
+      "args": ["-m", "search_mcp"],
+      "env": {}
+    },
+    "weather": {
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}

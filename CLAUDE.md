@@ -172,6 +172,21 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   不走 MCP；镜像 tell.py 格式不变量——主题剥 `X、` 序号、正文逐字、末尾无空行；参数
   theme=一/二/三/四 或关键词按主题挑、avoid=<上一条《》标题> 避让防重复，讲完说"再来
   一个"模型自动带 avoid 再调；语料是 1975 历史文献，当历史段子讲不影射当代）。
+  **MCP 工具桥接（2026-09-21，`tool/mcp_bridge.py`，详见 docs/llm-tools.md §5.8）**：llm+
+  tools 也能接 MCP server——`tool/mcp.local.json`（**gitignored**，含机器路径/凭据；示例
+  `tool/mcp.local.example.json` 入库可抄）配 `command`（stdio 子进程）或 `url`（streamable
+  HTTP），桥接层把每个 MCP 工具的 input_schema 转成本方案 `Tool`（暴露名 `server_工具名`），
+  fn 桥后台事件循环 `call_tool`。**`mcp` 是 `--tools` 的特殊 token**：`--tools mcp` = 只
+  MCP、`--tools all`/不传 = 本地+MCP 全上（无 mcp.local.json 时干净跳过打一行提示）、
+  `--tools get_time,mcp` = 混合。mcp SDK 2.x 坑：`ClientSession` **不自动握手**，必须显式
+  `await session.initialize()` 再 `list_tools()`（否则 server 拒 `Invalid request parameters`）；
+  FastMCP 改名 `MCPServer`；MCP 工具字段是 `input_schema`。**`.mcp.json` 风格字段照常识别**：
+  `disabled: true` 跳过、`timeout` 作该 server 工具超时、`env` 透传；路径解耦——`command`
+  python→`sys.executable`、相对 command/args 视为相对**仓库根**转绝对、`-m <模块名>` 不转
+  （业务 MCP 脚本惯例放 `tool/mcp_tools/`，如 author.py，配置 `args: ["./tool/mcp_tools/author.py"]`）。
+  退出接线 main finally
+  `close_mcp_tools()`（+atexit 兜底）。headless 验证 `tmp/test_mcp_tools.py`（真实 MCPServer
+  stdio + HTTP + author_info 端到端）。**写新 MCP 客户端代码记得显式 initialize**。
   **工具包网络策略**：代码**不写死代理地址**；`load_tools()` 未显式配置 HTTP_PROXY/HTTPS_PROXY
   → 自动 `NO_PROXY=*` 绕过 Windows 系统代理直连（Clash 没开也能查国内源）；显式配了则尊重。
   **追问自动重查**：
@@ -481,7 +496,10 @@ tool/            LLM 模式工具包（--tools，docs/llm-tools.md）：base.py�
                  __init__.py（pkgutil 自动扫描，新增工具=丢一个 py 文件零改码）+
                  time_tool.py（get_time 零网络）+ weather.py（get_weather 复用 qweather 技能）+
                  gold.py（get_gold_history 复用 assistant/gold 数据管线，参照 soviet-joke 模式）+
-                 soviet_joke.py（get_soviet_joke 复用 soviet-joke skill 语料，theme/avoid 参数）
+                 soviet_joke.py（get_soviet_joke 复用 soviet-joke skill 语料，theme/avoid 参数）+
+                 mcp_bridge.py（MCP 桥接：后台事件循环 + ClientSession 保活 + list_tools→Tool +
+                   fn 桥 call_tool + close_mcp_tools，见 docs/llm-tools.md §5.8）+
+                 mcp.local.json（MCP server 配置，gitignored；示例 mcp.local.example.json 入库）
 assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力；
                  独立 git 子模块（GitHub 私有仓库，凭据不入库），设计目标/目录结构见 docs/voice-dialogue.md「assistant/ 目录」节
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）

@@ -33,3 +33,6 @@ dialogue/user_prompt.txt
 
 # assistant/ 是独立 git 子模块（GitHub 私有仓库）：凭据/缓存由子模块自身 .gitignore 排除，
 # voice1 只跟踪子模块指针（gitlink），不再管 assistant/ 内部文件。
+
+# MCP 桥接本地配置（机器路径/凭据，绝不入库；示例见 tool/mcp.local.example.json）
+tool/mcp.local.json

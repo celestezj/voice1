@@ -989,6 +989,11 @@ def main():
         if live2d is not None:
             live2d.close()                        # 恢复初始状态（收框+表情平和）+ 停发送 worker
         tts.close()                               # 若 tts 是 SayTTS 代理，__getattr__ 落到真对象
+        try:                                      # MCP 桥接（--tools 含 mcp/all 时已加载）
+            from tool.mcp_bridge import close_mcp_tools
+            close_mcp_tools()
+        except Exception:
+            pass
         print("已退出。", flush=True)
 
 

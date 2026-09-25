@@ -297,11 +297,61 @@ sequenceDiagram
     Note over LLM: 打断 gen+1 / hard_stop：<br/>在途 LLM 流弃 · TTS 切音<br/>in-flight 工具结果作废不 commit<br/>被打断的问题保留进历史
 ```
 
+### 5.8 MCP 工具桥接（stdio / streamable HTTP，2026-09-21 已实现）
+
+**问题**：llm+tools 模式只认 `tool/` 的本地 `Tool`（同步 fn + XML 内联标签）；MCP server 是
+JSON-RPC（stdio 子进程 / streamable HTTP），SDK 是 asyncio 客户端，无法直接进 `--tools`。
+**方案**：桥接层把 MCP server 枚举的工具**转成本方案的 `Tool` 实例**——模型照常写
+`<server_工具名 .../>` 标签，`_llm_loop` 照常执行/结果回灌/多轮，DeepSeek 完全不知道背后是
+MCP。等价于把「二期 MCP 包装」提前落地。
+
+- **配置**：`tool/mcp.local.json`（**gitignored**，含机器路径/凭据；示例 `tool/mcp.local.example.json`
+  入库可抄）。格式与 `.mcp.json` 同款：
+  ```json
+  { "mcpServers": {
+      "search":  { "command": "C:/.../.venv-search/Scripts/python.exe", "args": ["-m", "search_mcp"], "env": {} },
+      "weather": { "url": "http://127.0.0.1:8080/mcp" } } }
+  ```
+  `command` → stdio 子进程；`url` → streamable HTTP（二选一）。配置路径可用环境变量
+  `VOICE1_MCP_CONFIG` 覆盖（headless 测试/非默认布局用）。
+  **`.mcp.json` 风格字段照常识别**：`disabled: true` 跳过该 server（改配置去掉即启用）；
+  `timeout`（秒）作为该 server 工具的执行/调用超时；`env` 透传子进程环境。
+  **路径解耦（与 agent.py 同款）**：`command` 为 `python/py/python3/pythonw` → 换成
+  本进程解释器 `sys.executable`（避免 PATH 里别的 python 缺 mcp 依赖）；相对 `command`/`args`
+  视为相对**仓库根**转绝对路径（跟"从哪启动 voice_dialogue"解耦）；`-m <模块名>` 形态下
+  `-m` 后的参数是模块名**不转**。业务 MCP server 脚本惯例放 `tool/mcp_tools/`（如
+  `tool/mcp_tools/author.py`），配置里 `args: ["./tool/mcp_tools/author.py"]` 即可。
+- **`mcp` 特殊 token**：`--tools mcp` = 只加载 MCP 工具；`--tools all`/不传 = 本地 + MCP 全上
+  （`mcp.local.json` 不存在时干净跳过、打一行提示，不影响 `all`）；`--tools get_time,mcp` = 混合。
+- **实现**：`tool/mcp_bridge.py`——**一个常驻后台事件循环线程**持有各 server 的
+  `ClientSession`（`async with` 保活），`list_tools()` 把每个 MCP 工具的 `input_schema`
+  （JSON Schema）转成 `Tool.params`（`[可选]` 前缀表可选，类型 + description），暴露名 =
+  `_sanitize(server_工具名)`（非法字符→`_`，数字开头补 `m_`），fn 用
+  `asyncio.run_coroutine_threadsafe` 桥到后台循环 `call_tool`，结果格式化：content 的 text 块
+  优先、`structuredContent` JSON 兜底、`isError` 转可读错误文本——**绝不抛异常**，模型只见干净
+  字符串。`close_mcp_tools()` 优雅断开（置 stop 事件 + cancel + 停循环），幂等、atexit 兜底、
+  main finally 接线。
+- **mcp SDK 2.x 踩坑（写新 MCP 客户端/服务端代码先看）**：① `ClientSession` **不再在
+  `__aenter__` 自动握手**，必须先 `await session.initialize()` 再 `list_tools()`——否则 server
+  回 `Invalid request parameters`（实测第一行线上消息就是 tools/list，被拒）；② FastMCP 改名
+  `MCPServer`（`from mcp.server.mcpserver import MCPServer`），`@server.add_tool` 装饰器注册、
+  `asyncio.run(server.run_stdio_async())` 跑 stdio、`server.run(transport="streamable-http",
+  host, port, streamable_http_path)` 跑 HTTP；③ MCP 工具字段是 `input_schema`（不是
+  `inputSchema`）；④ 老脚本（mcp 1.x）的 `from mcp.server.fastmcp import FastMCP` /
+  `@mcp.tool()` / `mcp.run(transport='stdio')` 三处都要迁（`tool/mcp_tools/author.py` 已迁，
+  抄它即可）；⑤ 参数描述要进 schema 得用 `Annotated[str, Field(description=...)]`——裸字符串
+  Annotated 元数据 pydantic 忽略。
+- **工具包网络策略**：HTTP 型 MCP server 由 `apply_network_policy()` 统一起作用（默认
+  `NO_PROXY=*` 直连）；stdio 型是本地子进程，无网络代理问题。
+
 ## 6. 参数控制（防旧功能衰退）
 
-- `--tools <名字列表|all>`：**仅在 `--brain llm` 时生效**；`--brain agent` 时忽略并打印提示
+- `--tools <名字列表|all|mcp>`：**仅在 `--brain llm` 时生效**；`--brain agent` 时忽略并打印提示
   （agent 走自己的 claude 工具/MCP，与本项目 `--agent-stream-tts` 只在 agent 模式生效对称）。
-- **默认关** = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径，现有行为零变化。
+  `mcp` 是特殊 token = 加载 `tool/mcp.local.json` 里的全部 MCP 工具（见 §5.8）；`all`/不传
+  含本地 + MCP；可混合（`--tools get_time,mcp`）。
+- **默认关** = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径，现有行为零变化（连
+  `mcp.local.json` 都不读——`--tools` 含 mcp/all 才碰）。
 - 安全阀参数均有默认值，不传不变。
 - 文档同步（memory 规则：改 CLI 必同步 CLAUDE.md / docs / README）。
 
@@ -326,11 +376,15 @@ sequenceDiagram
 | `tool/weather.py` | 首批示例：`get_weather`（qweather HTTP，复用 assistant/qweather 技能） |
 | `tool/gold.py` | `get_gold_history`（复用 assistant/gold 数据管线，参照 soviet-joke 模式：确定性逻辑全在数据脚本，Tool 只薄封装不造数） |
 | `tool/soviet_joke.py` | `get_soviet_joke`（复用 soviet-joke skill 语料 corpus.md，镜像 tell.py 格式不变量，theme/avoid 参数） |
+| `tool/mcp_bridge.py` | **MCP 桥接（§5.8）**：后台事件循环线程 + 各 server ClientSession 保活 + `list_tools`→Tool 转换 + fn 桥 `call_tool` + 结果格式化 + `close_mcp_tools()` |
+| `tool/mcp.local.json` | MCP server 配置（**gitignored**，机器路径/凭据）；示例 `tool/mcp.local.example.json` 入库 |
+| `tool/__init__.py` | `load_tools` 处理 `mcp` 特殊 token（all/mcp/混合） |
 | `dialogue/toolparse.py` | XML 流式解析器（Alife 移植，feed→(clean,calls)） |
 | `dialogue/controller.py` | `_llm_loop` 多轮循环 + 工具执行 + 结果回灌 + 过渡句先出声 + `_TAG_RE` |
-| `examples/voice_dialogue.py` | `--tools` / `--tools-max-rounds` / `--tools-timeout` 参数 + 加载与 `on_tool` 诊断行 |
+| `examples/voice_dialogue.py` | `--tools` / `--tools-max-rounds` / `--tools-timeout` 参数 + 加载与 `on_tool` 诊断行 + finally 里 `close_mcp_tools()` |
 | `CLAUDE.md` / `docs/voice-dialogue.md` / `README.md` | 文档同步 |
 | `tmp/test_llm_tools.py`（gitignored） | headless：解析器单元 + 假 LLM 两轮流 + 安全阀 + 默认关零变化 |
+| `tmp/test_mcp_tools.py`（gitignored） | headless：真实 MCPServer stdio + streamable HTTP 端到端（枚举/参数转换/调用/幂等/close 清空/重连 + load_tools mcp token） |
 
 ## 9. 验证计划
 
@@ -338,6 +392,10 @@ sequenceDiagram
    `_llm_loop` 两轮流（假 LLM 第 1 轮吐过渡句+标签、工具执行、第 2 轮吐答案，断言 commit 历史
    含 `[工具结果]`、TTS 不含标签、过渡句已出声）；安全阀（超时/轮数上限/异常回灌）；`--tools`
    默认关时行为与旧路径字节级一致。
+1b. **MCP headless**：`tmp/test_mcp_tools.py` —— 真实 MCPServer（mcp SDK 2.x）stdio +
+   streamable HTTP 端到端：`load_mcp_tools` 枚举（暴露名带 server 前缀）、`_schema_to_params`
+   转换（required/[可选]/description）、`Tool.run` 实际调用（add/hello 中文/无参工具）、幂等、
+   close 清空 + 可重连、`load_tools` 的 mcp token（`mcp`=只 MCP / `get_time,mcp`=混合）。
 2. **真机（LLM 模式）**：`python examples/voice_dialogue.py --asr-device cuda --tts-device cuda
    --tools all ...`：
    - "现在几点" → 单轮 get_time，过渡句立即出声，答案随后；
@@ -346,6 +404,10 @@ sequenceDiagram
    - "讲个苏联笑话" → 过渡句出声 + get_soviet_joke + 最终答案逐字引用；工具返回后**不再重复
      开场过渡**（`[工具结果]` 带"不重复过渡"指令）；"再来一个" → 模型带 avoid=<上一条标题>
      再调不重复；
+   - **MCP 真机**：配好 `tool/mcp.local.json` 后 `--tools mcp`（或 all）→ 问一个 MCP server
+     能力内的问题 → 过渡句出声 + `<server_工具名>` 标签执行 + 最终答案；server 没起/连不上 →
+     该 server 工具进提示词时 fn 返回可读错误文本（"未连接"），不影响其他工具；退出无残留
+     进程（close_mcp_tools 断开子进程）。
    - 不触发工具的普通问答 → 与不开 `--tools` 同样快（单轮）；
    - 打断"停下" / 新句 barge-in → 在途工具续轮作废；
    - 心态标记/存档/live2d 正常。
@@ -353,11 +415,13 @@ sequenceDiagram
 
 ## 10. 边界与二期
 
-- **与 agent 模式的关系**：两套工具体系**互不混用**——LLM 模式用本方案的 `tool/`，
-  agent 模式仍用 claude 原生工具 + MCP + 技能。`--brain` 决定走哪套。
-- **MCP 包装（二期）**：参照 Alife `AlifeMcp.cs`，把 assistant/ 的 MCP server（qweather/gold/
-  skills）包装成本方案的 `Tool`（MCP tool → 参数 schema → 结果字符串），即可在 LLM 模式复用
-  现有 MCP 资产。
+- **与 agent 模式的关系**：两套工具体系**互不混用**——LLM 模式用本方案的 `tool/`
+  （本地 `@tool` + MCP 桥接 §5.8），agent 模式仍用 claude 原生工具 + MCP + 技能。
+  `--brain` 决定走哪套。
+- **MCP 包装（已实现）**：§5.8 桥接层把任意 MCP server（stdio / streamable HTTP）的工具
+  转成本方案 `Tool`，LLM 模式即可复用现有 MCP 资产（assistant/ 的 qweather/gold 等——直接
+  在 `tool/mcp.local.json` 里加对应 server 即可）。本地直连工具（get_weather/gold 不走 MCP
+  更轻）仍保留，两者可并存。
 - **双档模型（二期）**：参照 `OpenAILanguageModel` 的 `thinkingRequester`——工具轮后续轮可切
   更强/带思考的模型档位；一期统一用 `deepseek-chat`。
 - **连接池（二期，可选）**：`llm.py` 改 `requests.Session` 复用连接，省每次 TLS 握手
