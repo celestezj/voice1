@@ -208,7 +208,10 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `present=`，数据类工具（天气/金价）留空走默认。
   headless 测试 `tmp/test_llm_tools.py`。完整设计见 `docs/llm-tools.md`。
   **启动期工具清单（2026-09-25）**：LLM 模式启动打印 `[tools] 已加载（…）：` + 分组清单
-  （`_describe_tools`：本地 `@tool` 一组、MCP 转换工具一组，逐条 `名字 — 描述`）；**不传
+  （`_describe_tools`：本地 `@tool` 一组、MCP 转换工具一组，逐条 `名字 — 描述`——
+  **描述只取首行**（`_one_line`，2026-09-25 用户实测：MCP 工具 description 是含 Args/Returns
+  的完整 docstring，启动清单不需要参数块，只需一句基础说明；本地工具本就一行不受影响））；
+  **不传
   `--tools`** 打一行 `[tools] 未启用工具调用`（本次纯 LLM 问答）——一眼分清"没开"还是
   "没工具"。agent 模式启动打印 `[agent] MCP 工具`（`probe_mcp_tools` 短暂连接枚举
   `assistant/.mcp.json` 实际工具名后即断）+ `[agent] skills`（`list_skills` 扫

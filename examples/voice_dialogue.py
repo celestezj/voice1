@@ -259,6 +259,17 @@ def _list_vits_voices():
                 print(line, flush=True)
 
 
+def _one_line(desc):
+    """取描述首行（MCP 工具的 description 是完整 docstring，含 Args/Returns 段；
+    启动清单只要一句说明即可，本地工具本来就是一行不受影响）。"""
+    if not desc:
+        return ""
+    for ln in desc.strip().splitlines():
+        if ln.strip():
+            return ln.strip()
+    return ""
+
+
 def _describe_tools(tools):
     """把 {name: Tool} 整理成 [本地]/[MCP] 两组的描述文本（工具名 + 一句说明）。
 
@@ -275,10 +286,10 @@ def _describe_tools(tools):
     lines = []
     if local:
         lines.append("[tools]   本地工具：")
-        lines += ["[tools]     %s — %s" % (n, (tools[n].description or "").strip()) for n in local]
+        lines += ["[tools]     %s — %s" % (n, _one_line(tools[n].description)) for n in local]
     if mcp:
         lines.append("[tools]   MCP 工具（tool/mcp.local.json 转换）：")
-        lines += ["[tools]     %s — %s" % (n, (tools[n].description or "").strip()) for n in mcp]
+        lines += ["[tools]     %s — %s" % (n, _one_line(tools[n].description)) for n in mcp]
     return "\n".join(lines)
 
 
