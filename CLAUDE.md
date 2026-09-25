@@ -183,7 +183,14 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   FastMCP 改名 `MCPServer`；MCP 工具字段是 `input_schema`。**`.mcp.json` 风格字段照常识别**：
   `disabled: true` 跳过、`timeout` 作该 server 工具超时、`env` 透传；路径解耦——`command`
   python→`sys.executable`、相对 command/args 视为相对**仓库根**转绝对、`-m <模块名>` 不转
-  （业务 MCP 脚本惯例放 `tool/mcp_tools/`，如 author.py，配置 `args: ["./tool/mcp_tools/author.py"]`）。
+  （业务 MCP 脚本惯例放 `tool/mcp_tools/`，如 author.py / lunar.py，配置
+  `args: ["./tool/mcp_tools/xxx.py"]`；`tool/mcp_tools/` 是子包、其内脚本无 `Tool` 实例，
+  不会被 `tool/__init__.py` 自动扫描误收）。
+  **lunar 日历/八字/黄历（2026-09-25）**：`tool/mcp_tools/lunar.py`（lunar_python 零依赖装
+  voice-asr），5 工具 `lunar_get_calendar`（黄历全览）/ `lunar_get_bazi`（八字排盘）/
+  `lunar_get_holiday`（法定节假日）/ `lunar_get_jieqi`（24 节气）/ `lunar_get_festival`（节日），
+  返回结构化中文 JSON；与 agent 模式同一脚本复用（见 docs/agent-integration.md「lunar-python
+  接入」）；自检 `--selfcheck`，headless 测试 `tmp/test_lunar_mcp.py`。
   退出接线 main finally
   `close_mcp_tools()`（+atexit 兜底）。headless 验证 `tmp/test_mcp_tools.py`（真实 MCPServer
   stdio + HTTP + author_info 端到端）。**写新 MCP 客户端代码记得显式 initialize**。
@@ -231,6 +238,10 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   `-m` 后的参数是模块名不转绝对路径（`agent.py` 已支持）；**search MCP 换设备重建
   流程（clone 源码→建 venv→pip install -e→可选装 chromium）见
   `docs/agent-integration.md`「free-search-mcp 接入详解与换设备重建」**；
+  **lunar 日历/八字/黄历 MCP（2026-09-25）**：`command: python` + `args: ["../tool/mcp_tools/lunar.py"]`
+  （相对 assistant 目录解析到仓库根；lunar_python 零依赖装 voice-asr，command 无需独立 venv）——
+  与 free-search-mcp 的"独立 venv + editable"正相反，换设备 `pip install lunar_python` 一条命令
+  即可，见 docs/agent-integration.md「lunar-python 接入」；
   `--agent-resume` 续上次会话
   （session_id 落盘 `sessions/agent_session_id.txt`）。默认 `--brain llm` 时现有 LLM 集成
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自
@@ -510,7 +521,10 @@ tool/            LLM 模式工具包（--tools，docs/llm-tools.md）：base.py�
                  soviet_joke.py（get_soviet_joke 复用 soviet-joke skill 语料，theme/avoid 参数）+
                  mcp_bridge.py（MCP 桥接：后台事件循环 + ClientSession 保活 + list_tools→Tool +
                    fn 桥 call_tool + close_mcp_tools，见 docs/llm-tools.md §5.8）+
-                 mcp.local.json（MCP server 配置，gitignored；示例 mcp.local.example.json 入库）
+                 mcp.local.json（MCP server 配置，gitignored；示例 mcp.local.example.json 入库）+
+                 mcp_tools/（业务 MCP server 脚本子包，无 Tool 实例不被自动扫描）：
+                   author.py + lunar.py（lunar 日历/八字/黄历，lunar_python 零依赖装 voice-asr，
+                   5 工具 lunar_get_*；agent 模式共用同一脚本，见 docs/agent-integration.md「lunar-python 接入」）
 assistant/       agent 大脑工作目录（cwd）：CLAUDE.md=人格（显式传 system_prompt）/ .mcp.json+skills/=能力；
                  独立 git 子模块（GitHub 私有仓库，凭据不入库），设计目标/目录结构见 docs/voice-dialogue.md「assistant/ 目录」节
 bench/           bench_asr.py（整句 CER/RTF/延迟）+ bench_streaming.py（流式 vs 整句出字延迟）

@@ -13,6 +13,12 @@
       "type": "stdio",
       "command": "python",
       "args": ["./tool/mcp_tools/author.py"]
+    },
+    "lunar": {
+      "timeout": 60,
+      "type": "stdio",
+      "command": "python",
+      "args": ["./tool/mcp_tools/lunar.py"]
     }
   }
 }

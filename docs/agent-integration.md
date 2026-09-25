@@ -302,6 +302,66 @@ python -m venv <仓库根>/assistant/.venv-search
 不用建 venv**，首次运行自动从 PyPI 拉包。代价：每次启动走 `uvx` 解析（首次较慢），且
 与当前"editable 指向源码"的做法不一致。若换设备不想维护本地源码 checkout 可改用这条。
 
+## lunar-python 接入（日历/八字/黄历查询，2026-09-25 实测）
+
+> **开源项目来源**：https://github.com/6tail/lunar-python
+> （MIT，纯 Python 零依赖日历库：公历/农历/佛历/道历、干支/生肖/节气/节日、彭祖百忌/每日宜忌、
+> 吉神方位/胎神/冲煞/纳音/星宿、八字/五行/十神、建除值星/黄道黑道等）。
+> 与 free-search-mcp 最大的不同：**零依赖** → 不建独立 venv，直接装进 voice-asr
+> （`pip install lunar_python` 一条命令），换设备一条命令可复现。
+
+### 接入链路
+
+1. **MCP server 脚本**：`tool/mcp_tools/lunar.py`（主仓库，入库），mcp SDK 2.x `MCPServer`，
+   暴露 5 个工具：
+   - `get_calendar(date)` — 某日**黄历全览**（农历/干支/生肖/宜忌/彭祖百忌/吉神方位/冲煞/星宿/
+     值星/黄道黑道/节日/数九三伏）；
+   - `get_bazi(date, time, gender, da_yun)` — **八字排盘**（四柱/五行/十神/纳音/旬空/命宫身宫
+     胎元/大运；23:00-23:59 属下一日子时，边界敏感会返回 error 提示）；
+   - `get_holiday(date)` — 法定节假日/调休（`HolidayUtil`）；
+   - `get_jieqi(year)` — 全年 24 节气表；
+   - `get_festival(date)` — 公历+农历节日。
+   带 `--selfcheck` 独立自检（仿 gold `--fetch`）；坏输入返回 `{"error": ...}` 不抛异常。
+2. **双模式同一份配置复用同一个脚本**（相对路径解析以各自基准）：
+   - **agent 模式** `assistant/.mcp.json`：
+     ```json
+     "lunar": { "command": "python", "args": ["../tool/mcp_tools/lunar.py"], "env": {} }
+     ```
+     （相对 args 以 assistant/ 为基准 → 仓库根 `tool/mcp_tools/lunar.py`；`command: python`
+     → voice-asr，lunar_python 就装在那里。）
+   - **LLM 模式** `tool/mcp.local.json`（gitignored；示例 `tool/mcp.local.example.json` 入库）：
+     ```json
+     "lunar": { "timeout": 60, "type": "stdio", "command": "python",
+                "args": ["./tool/mcp_tools/lunar.py"] }
+     ```
+     （相对 args 以仓库根为基准；`--tools all|mcp` 时暴露 `lunar_get_*`。）
+3. **挂载/探测/放行全自动零改码**：agent 模式 `mcp__lunar__*` 白名单自动补，
+   `[agent] MCP 工具：lunar : …` 启动清单自动出现；LLM 模式 `[tools]` 分组自动列出。
+
+### 换设备能否复现
+
+**能，两步即可**（对比 free-search-mcp 的四步）：
+
+| 组件 | 状态 | 换设备影响 |
+|---|---|---|
+| `tool/mcp_tools/lunar.py` | 已入库（主仓库） | ✅ 直接可复现 |
+| `assistant/.mcp.json` + `tool/mcp.local.json` | 已入库 / 示例入库 | ✅ 直接可复现（`mcp.local.json` 需重建一份） |
+| `lunar_python` 库 | 装进 voice-asr（**非独立 venv**） | ❌ 新设备 `pip install lunar_python` 一条命令 |
+
+### 重建步骤（新设备两步）
+
+```bash
+# ① 装库（零依赖，一条命令进 voice-asr）
+conda activate voice-asr && python -m pip install lunar_python
+
+# ② 若 LLM 模式需要，重建本机业务配置（仓库内的脚本/示例已随 git 同步，直接可用）
+#    抄 tool/mcp.local.example.json 里的 lunar 段到 tool/mcp.local.json 即可
+```
+
+验证：`python -c "from lunar_python import Solar; from lunar_python.util import HolidayUtil"` 不报错；
+或 `python tool/mcp_tools/lunar.py --selfcheck` 打印各工具样例；或直接跑主程序看
+`[agent] MCP 工具：lunar : …` / `[tools] …lunar_get_*` 清单。
+
 ## 技术风险 / 待验证点
 
 - **abort 不 kill 的具体机制**（整个设计唯一的技术风险点，实现第一步先验证）：
@@ -354,3 +414,6 @@ python -m venv <仓库根>/assistant/.venv-search
 - 2026-09-25：新增「free-search-mcp 接入详解与换设备重建」节——接入链路（.mcp.json →
   venv python → `-m search_mcp`）、裸 python 踩坑、可复现性判定表、四步重建流程、
   依赖清单、`uvx` 替代方案。
+- 2026-09-25：新增「lunar-python 接入」节——日历/八字/黄历查询 MCP（5 工具）、双模式
+  同一脚本复用（agent `../tool/mcp_tools/lunar.py` + LLM `./tool/mcp_tools/lunar.py`）、
+  零依赖装进 voice-asr、换设备两步重建。

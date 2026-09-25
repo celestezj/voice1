@@ -320,7 +320,15 @@ MCP。等价于把「二期 MCP 包装」提前落地。
   本进程解释器 `sys.executable`（避免 PATH 里别的 python 缺 mcp 依赖）；相对 `command`/`args`
   视为相对**仓库根**转绝对路径（跟"从哪启动 voice_dialogue"解耦）；`-m <模块名>` 形态下
   `-m` 后的参数是模块名**不转**。业务 MCP server 脚本惯例放 `tool/mcp_tools/`（如
-  `tool/mcp_tools/author.py`），配置里 `args: ["./tool/mcp_tools/author.py"]` 即可。
+  `tool/mcp_tools/author.py` / `tool/mcp_tools/lunar.py`），配置里 `args: ["./tool/mcp_tools/author.py"]`
+  即可。**`tool/mcp_tools/` 是子包、其内脚本无 `Tool` 实例 → 不会被 `tool/__init__.py` 的
+  pkgutil 自动扫描误收**，安全放业务 MCP server。
+  **lunar 日历/八字/黄历（2026-09-25）**：`tool/mcp_tools/lunar.py`（lunar_python，零依赖装
+  voice-asr），5 个工具 `lunar_get_calendar`（黄历全览）/ `lunar_get_bazi`（八字排盘）/
+  `lunar_get_holiday`（法定节假日）/ `lunar_get_jieqi`（24 节气）/ `lunar_get_festival`（节日），
+  返回结构化中文 JSON。与 agent 模式同一份配置复用同一脚本（见
+  docs/agent-integration.md「lunar-python 接入」）。自检 `python tool/mcp_tools/lunar.py --selfcheck`，
+  headless 测试 `tmp/test_lunar_mcp.py`。
 - **`mcp` 特殊 token**：`--tools mcp` = 只加载 MCP 工具；`--tools all`/不传 = 本地 + MCP 全上
   （`mcp.local.json` 不存在时干净跳过、打一行提示，不影响 `all`）；`--tools get_time,mcp` = 混合。
 - **实现**：`tool/mcp_bridge.py`——**一个常驻后台事件循环线程**持有各 server 的
@@ -378,6 +386,7 @@ MCP。等价于把「二期 MCP 包装」提前落地。
 | `tool/soviet_joke.py` | `get_soviet_joke`（复用 soviet-joke skill 语料 corpus.md，镜像 tell.py 格式不变量，theme/avoid 参数） |
 | `tool/mcp_bridge.py` | **MCP 桥接（§5.8）**：后台事件循环线程 + 各 server ClientSession 保活 + `list_tools`→Tool 转换 + fn 桥 `call_tool` + 结果格式化 + `close_mcp_tools()` |
 | `tool/mcp.local.json` | MCP server 配置（**gitignored**，机器路径/凭据）；示例 `tool/mcp.local.example.json` 入库 |
+| `tool/mcp_tools/lunar.py` | lunar 日历/八字/黄历 MCP server（lunar_python 零依赖装 voice-asr，5 工具 `lunar_get_*`；agent 模式共用同一脚本，见 docs/agent-integration.md） |
 | `tool/__init__.py` | `load_tools` 处理 `mcp` 特殊 token（all/mcp/混合） |
 | `dialogue/toolparse.py` | XML 流式解析器（Alife 移植，feed→(clean,calls)） |
 | `dialogue/controller.py` | `_llm_loop` 多轮循环 + 工具执行 + 结果回灌 + 过渡句先出声 + `_TAG_RE` |

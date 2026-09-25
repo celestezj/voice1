@@ -44,8 +44,11 @@ python bench/bench_asr.py --backend paraformer --device cuda --tag my     # 验�
   get_weather / get_gold_history / get_soviet_joke），保住 0.5s 首 token 的速度；工具包在
   仓库根 `tool/`，新增工具=丢一个 py 文件；**MCP 桥接**（`--tools mcp` 或 `all` 自动含）——
   配置 `tool/mcp.local.json`（stdio / streamable HTTP）即可把任意 MCP server 的工具接进
-  llm+tools 模式——见
-  [`docs/llm-tools.md`](docs/llm-tools.md)。
+  llm+tools 模式；内置 **lunar 日历/八字/黄历** MCP（`lunar_get_calendar` / `lunar_get_bazi` /
+  `lunar_get_holiday` / `lunar_get_jieqi` / `lunar_get_festival`，lunar_python 零依赖装
+  voice-asr）——见
+  [`docs/llm-tools.md`](docs/llm-tools.md) 与
+  [`docs/agent-integration.md`](docs/agent-integration.md)「lunar-python 接入」。
 - LLM 引擎扩展（DeepSeek/llmx 之外换引擎怎么做）：见 [`docs/EXTENDING-BACKENDS.md`](docs/EXTENDING-BACKENDS.md)。
 
 ## 引擎设计（RealtimeASR）
