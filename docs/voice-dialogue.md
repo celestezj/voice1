@@ -467,7 +467,8 @@ sequenceDiagram
 给 **DeepSeek 直连的 LLM 模式**补上工具调用能力，同时**保住它 0.5s 首 token 的速度**——
 不做 agent 编排，参照 Alife 用 **XML 内联工具调用**。完整设计见 `docs/llm-tools.md`。
 
-- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather,get_gold_history,get_soviet_joke` 按名加载）。
+- **怎么开**：`--brain llm --tools all`（或 `--tools get_time,get_weather,get_gold_history,get_soviet_joke` 按名加载；
+  `--tools mcp` = 只加载 MCP 工具，见下「MCP 桥接」）。
   **默认关**：不传 `--tools` = 不注入提示、不挂解析器、`_llm_loop` 走单轮原路径，**旧行为
   零变化**。`--brain agent` 下忽略并打印提示（agent 走 claude 原生工具/MCP，两套不混用）。
 - **工作原理**：系统提示词注入工具文档 → 模型在**输出文本流里直接写自闭合 XML 标签**
@@ -487,10 +488,18 @@ sequenceDiagram
   全历史统计 + 国际现货金实时，含免责声明）、`tool/soviet_joke.py`（`get_soviet_joke` 复用
   assistant 的 soviet-joke skill 语料读 corpus.md 挑一条，不走 MCP；镜像 tell.py 格式不变量，
   参数 theme 按主题挑 / avoid 避让已讲过的标题防"再来一个"重复）。
+- **MCP 桥接（2026-09-21）**：llm+tools 也能接 MCP server——`tool/mcp.local.json`（**gitignored**，
+  含机器路径/凭据；示例 `tool/mcp.local.example.json` 入库可抄）配 `command`（stdio 子进程）或
+  `url`（streamable HTTP），桥接层把 MCP 工具转成本方案 `Tool`，**暴露名 `server_工具名`**（如
+  `author_info_get_author_info`），模型照常写 XML 标签调用。业务 MCP 脚本惯例放 `tool/mcp_tools/`。
+  `--tools mcp` = 只 MCP、`--tools all`/不传 = 本地 + MCP 全上（无 mcp.local.json 时干净跳过）、
+  `--tools get_time,mcp` = 混合。支持 `.mcp.json` 风格字段（`disabled` 跳过 / `timeout` 作工具
+  超时 / `env` 透传），`command: python` 自动换 `sys.executable`、相对路径按仓库根转绝对。
+  完整设计见 `docs/llm-tools.md` §5.8。
 - **参数**：
   - `--tools-max-rounds <n>`（默认 3）：工具续轮上限，防无限循环。
   - `--tools-timeout <秒>`：覆盖单工具默认执行超时（不传用自带，如 get_time=3s /
-    get_weather=15s）。
+    get_weather=15s；MCP 工具超时取 `tool/mcp.local.json` 里对应 server 的 `timeout`，缺省 60s）。
 - **安全阀**：工具执行在独立线程 + 超时守卫（防挂死拖住 LLM 流）；异常/超时/未知工具都回灌
   `[工具错误: …]` 让模型优雅回应；结果按 `max_result` 截断防爆上下文。
 - **网络代理**（2026-09-18）：代码**不写死代理地址**；`load_tools()` 时未显式配
@@ -510,7 +519,9 @@ sequenceDiagram
   工具结果进 `_history`（`[工具结果]` user 消息），存档/压缩正常包含；心态标记/live2d 不动。
 - **headless 测试**：`tmp/test_llm_tools.py`（gitignored）——XML 解析器单元（跨 delta 拆分 /
   成对标签 / 透明容器 / 实体 / 注释）/ 假 LLM 两轮流（过渡句先出声、历史顺序）/ 安全阀
-  （轮数上限 / 超时 / 异常 / 未知工具）/ 默认关零变化。
+  （轮数上限 / 超时 / 异常 / 未知工具）/ 默认关零变化；`tmp/test_mcp_tools.py`——真实
+  MCPServer（mcp SDK 2.x）stdio + streamable HTTP 端到端（枚举 / 参数转换 / 调用 / disabled
+  跳过 / close 清空 / load_tools 的 mcp token 展开）。
 
 ## 会话历史存档（本地记录，默认开）
 

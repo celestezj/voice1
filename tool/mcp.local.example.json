@@ -7,6 +7,12 @@
     },
     "weather": {
       "url": "http://127.0.0.1:8080/mcp"
+    },
+    "author_info": {
+      "timeout": 60,
+      "type": "stdio",
+      "command": "python",
+      "args": ["./tool/mcp_tools/author.py"]
     }
   }
 }
