@@ -228,7 +228,9 @@ voice0 仓库地址：https://github.com/celestezj/voice0
   带独立 venv 的 MCP（如 search `free-search-mcp`）：`command` 写相对 assistant 目录的
   venv python（如 `.venv-search/Scripts/python.exe`）+ `args: ["-m", "search_mcp"]`——
   裸 `python` 会被替换成 voice-asr，独立 venv 的包找不到（实测 search MCP 挂载失败根因）；
-  `-m` 后的参数是模块名不转绝对路径（`agent.py` 已支持）；
+  `-m` 后的参数是模块名不转绝对路径（`agent.py` 已支持）；**search MCP 换设备重建
+  流程（clone 源码→建 venv→pip install -e→可选装 chromium）见
+  `docs/agent-integration.md`「free-search-mcp 接入详解与换设备重建」**；
   `--agent-resume` 续上次会话
   （session_id 落盘 `sessions/agent_session_id.txt`）。默认 `--brain llm` 时现有 LLM 集成
   **零改动**。详见 `docs/agent-integration.md`。**写新 agent 代码注意**：partial 增量来自

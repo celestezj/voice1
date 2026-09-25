@@ -217,6 +217,91 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
   `_on_agent_result`（三态 + 最后心态标记界定结论） / `_find_cut`（心态标记作切点） /
   `_PARTICLES`（语气词兜底切）。
 
+## free-search-mcp 接入详解与换设备重建（2026-09-25 实测）
+
+> 本机现状快照：上游源码 clone 在 `E:\temp\free-search-mcp`（commit 83707d5，
+> origin `git@celestezj:sweetcornna/free-search-mcp.git`）；`assistant/.venv-search`
+> 为独立 venv（Python 3.12.7，base 是 D:\anaconda），free-search-mcp **0.11.0**
+> 以 **editable** 方式安装（`_editable_impl_free_search_mcp.pth` → 本机源码路径）；
+> `ms-playwright` 目录**无 chromium**（只有 daemon/ffmpeg/winldd）——默认引擎照样能搜。
+
+### 接入链路
+
+1. **挂载配置**在 `assistant/.mcp.json`（已入库、自包含）：
+   ```json
+   "search": {
+     "command": ".venv-search/Scripts/python.exe",
+     "args": ["-m", "search_mcp"],
+     "env": {}
+   }
+   ```
+2. **路径解析**（`agent.py` `_resolve_mcp_config`，挂载与启动探测共用）：
+   - `command` 是相对 assistant 目录的**非 python 可执行文件** → 解析成
+     `assistant/.venv-search/Scripts/python.exe`（**不被替换成 voice-asr**）。
+   - `args: ["-m", "search_mcp"]` 是 `-m` 模块名 → **保持原样不做路径解析**。
+   - 这两个规则缺一不可，见下方"为什么不能配裸 python"。
+3. **入口点**：free-search-mcp 安装后提供 `free-search-mcp` / `search-mcp` / `-m search_mcp`
+   三种入口，都落到 `search_mcp.__main__:main`。stdin/stdout 走 MCP 2.x stdio 协议。
+4. **能力本质**：**本地优先、免 API key** 的搜索 MCP（上游 `sweetcornna/free-search-mcp`，
+   MIT）。默认四引擎全 HTTP：`duckduckgo` / `mojeek` / `googlenews` / `bing`
+   （`src/search_mcp/config.py` `default_engines`），**无 key 零配置直接可用**。
+
+### 为什么不能配裸 `python`（踩坑实测）
+
+`agent.py` 会把 `command: python` 替换成 `sys.executable`（voice-asr），而 `search_mcp`
+只装在 `.venv-search` 里，voice-asr 没有 → 启动即 `No module named search_mcp` →
+server 启动失败 → 工具**静默不挂载**（实测 AI 只有金价工具、search 隐形，无任何报错）。
+`command` 一旦换成 venv python、`-m` 保留，立即挂载成功。
+
+### 换设备能否复现
+
+**不能直接搬，但可四步重建**。机器相关的三点：
+
+| 组件 | 状态 | 换设备影响 |
+|---|---|---|
+| `assistant/.mcp.json` | 已入库、全相对路径 | ✅ 直接可复现，不用改 |
+| `assistant/.venv-search/` | **gitignored**（`assistant/.gitignore:30`） | ❌ 必须重建 |
+| 上游源码 `E:\temp\free-search-mcp` | **独立 git clone**（不在 voice1 仓库） | ❌ 必须另行 clone |
+| editable 安装的 `.pth` | 硬编码指向**本机绝对路径** | ❌ 重建 venv 时指向新路径 |
+
+editable 是"指向本机源码 checkout"，**不是**把包复制进 venv——换设备光重建 venv 没用，
+得先把源码 clone 下来。
+
+### 重建步骤（新设备四步）
+
+```bash
+# ① clone 上游源码（路径随意，不必 E:\temp\free-search-mcp）
+git clone git@celestezj:sweetcornna/free-search-mcp.git   # 或 https 上游
+
+# ② 建独立 venv（Python 需 >= 3.11；本机用 D:\anaconda 的 3.12.7）
+python -m venv E:\temp\voice1\assistant\.venv-search
+
+# ③ 以 editable 方式安装（指向本机 clone 路径）
+E:\temp\voice1\assistant\.venv-search\Scripts\pip install -e <clone路径>
+
+# ④ （可选）装 Chromium 浏览器
+E:\temp\voice1\assistant\.venv-search\Scripts\playwright install chromium
+```
+
+**`assistant/.mcp.json` 一行不用改**——已是相对路径 + `-m` 模块名，venv 建好、源码装好即生效。
+验证：`assistant/.venv-search/Scripts/python.exe -c "import search_mcp"` 不报错；或直接跑
+主程序看启动 `[agent] MCP 工具：search : …` 清单。
+
+### 要装什么
+
+- **Python 3.11+**（建 venv 的 base，本机 D:\anaconda 3.12.7）。
+- **free-search-mcp 包 + 依赖**：`pip install -e` 自动装 `playwright`（本机 1.62）、`httpx`、
+  `mcp>=2.0`（本机 2.2）、`pydantic` 等——已验证 `search_mcp` 可正常 import。
+- **Chromium（可选但推荐）**：默认四引擎全 HTTP，**不装也能搜**；但浏览器渲染引擎
+  （`startpage` / `zhihu` 等）和 JS 重的页面抓取需要 Chromium。没装时那些调用返回
+  "请先运行 `playwright install chromium`" 提示，**不报错**。本机当前未装。
+
+### 更省事的替代方案（可选）
+
+上游 README：任何 MCP 客户端可直接配 `command: uvx free-search-mcp`——**不用 clone、
+不用建 venv**，首次运行自动从 PyPI 拉包。代价：每次启动走 `uvx` 解析（首次较慢），且
+与当前"editable 指向源码"的做法不一致。若换设备不想维护本地源码 checkout 可改用这条。
+
 ## 技术风险 / 待验证点
 
 - **abort 不 kill 的具体机制**（整个设计唯一的技术风险点，实现第一步先验证）：
@@ -266,3 +351,6 @@ agent：……（继续思考 + 调用开灯工具）…卧室灯已打开
 - 2026-09-04：方案闭环，记录设计结论（开关/常驻会话/旁路/打断=ESC/权限【询问】/重启续会话）。
 - 2026-09-04：实现完成 + 实测修正（StreamEvent partial、per-gen 事件收尾、abort 顺序），
   验收通过（LLM 模式回归 13 项全过 + agent 全链路集成测试 6 项全过）。
+- 2026-09-25：新增「free-search-mcp 接入详解与换设备重建」节——接入链路（.mcp.json →
+  venv python → `-m search_mcp`）、裸 python 踩坑、可复现性判定表、四步重建流程、
+  依赖清单、`uvx` 替代方案。
